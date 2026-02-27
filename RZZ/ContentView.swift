@@ -2,11 +2,11 @@ import SwiftUI
 import SwiftData
 import WebKit
 
-private enum SidebarSelection: Hashable {
+private enum ArticleFilter: String, CaseIterable, Identifiable {
     case all
     case starred
-    case feed(PersistentIdentifier)
-    case article(PersistentIdentifier)
+
+    var id: String { rawValue }
 }
 
 private struct FeedEditDraft: Identifiable {
@@ -45,8 +45,11 @@ struct ContentView: View {
     @Query(sort: [SortDescriptor(\Feed.createdAt, order: .reverse)]) private var feeds: [Feed]
     @Query(sort: [SortDescriptor(\Article.publishedAt, order: .reverse), SortDescriptor(\Article.createdAt, order: .reverse)]) private var articles: [Article]
 
-    @State private var sidebarSelection: SidebarSelection? = .all
-    @State private var expandedFeedIDs: Set<PersistentIdentifier> = []
+    @State private var isAllFeedsSelected = true
+    @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
+    @State private var isFeedsExpanded = true
+    @State private var articleFilter: ArticleFilter = .all
+    @State private var selectedArticleID: PersistentIdentifier?
     @State private var showAddFeed = false
     @State private var editDraft: FeedEditDraft?
     @State private var isRefreshing = false
@@ -54,144 +57,67 @@ struct ContentView: View {
     @State private var pendingDeletionRequest: FeedDeletionRequest?
 
     private var displayedArticles: [Article] {
-        let sourceArticles = filteredArticles(articles)
-        switch sidebarSelection {
-        case .starred:
-            return sourceArticles.sorted { lhs, rhs in
-                (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
+        var scoped = articles
+
+        if let feedIDs = effectiveSelectedFeedIDs {
+            scoped = scoped.filter { article in
+                guard let feedID = article.feed?.persistentModelID else { return false }
+                return feedIDs.contains(feedID)
             }
-        case .feed(let id):
-            return sourceArticles
-                .filter { $0.feed?.persistentModelID == id }
-                .sorted { lhs, rhs in
-                    (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
-                }
-        case .article(let articleID):
-            guard let article = sourceArticles.first(where: { $0.persistentModelID == articleID }),
-                  let feedID = article.feed?.persistentModelID else {
-                return []
-            }
-            return sourceArticles
-                .filter { $0.feed?.persistentModelID == feedID }
-                .sorted { lhs, rhs in
-                    (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
-                }
-        default:
-            return sourceArticles.sorted { lhs, rhs in
-                (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
-            }
+        }
+
+        if articleFilter == .starred {
+            scoped = scoped.filter(\.isStarred)
+        }
+
+        return scoped.sorted { lhs, rhs in
+            (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
         }
     }
 
+    private var effectiveSelectedFeedIDs: Set<PersistentIdentifier>? {
+        guard !isAllFeedsSelected, !selectedFeedIDs.isEmpty else { return nil }
+        return selectedFeedIDs
+    }
+
+    private var selectedFeeds: [Feed] {
+        feeds.filter { selectedFeedIDs.contains($0.persistentModelID) }
+    }
+
+    private var hasCustomFeedSelection: Bool {
+        !isAllFeedsSelected && !selectedFeedIDs.isEmpty
+    }
+
+    private var feedScopeSummary: String {
+        if isAllFeedsSelected || selectedFeedIDs.isEmpty {
+            return "All feeds selected"
+        }
+
+        if selectedFeeds.count == 1, let feed = selectedFeeds.first {
+            return "Selected: \(feed.title)"
+        }
+
+        return "Selected: \(selectedFeeds.count) feeds"
+    }
+
     private var selectedArticle: Article? {
-        guard case .article(let articleID) = sidebarSelection else { return nil }
-        return articles.first(where: { $0.persistentModelID == articleID })
+        guard let selectedArticleID else { return nil }
+        guard displayedArticles.contains(where: { $0.persistentModelID == selectedArticleID }) else { return nil }
+        return articles.first(where: { $0.persistentModelID == selectedArticleID })
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $sidebarSelection) {
-                Section("Filters") {
-                    Label("All Articles", systemImage: "doc.text")
-                        .tag(SidebarSelection.all)
-                    Label("Starred", systemImage: "star.fill")
-                        .tag(SidebarSelection.starred)
-                }
+        VStack(spacing: 0) {
+            NavigationSplitView {
+                sidebarPane
+            } content: {
+                articleListPane
+            } detail: {
+                articleDetailPane
+            }
 
-                Section("Feeds") {
-                    ForEach(feeds) { feed in
-                        DisclosureGroup(
-                            isExpanded: Binding(
-                                get: { expandedFeedIDs.contains(feed.persistentModelID) },
-                                set: { isExpanded in
-                                    if isExpanded {
-                                        expandedFeedIDs.insert(feed.persistentModelID)
-                                    } else {
-                                        expandedFeedIDs.remove(feed.persistentModelID)
-                                    }
-                                }
-                            )
-                        ) {
-                            ForEach(feedArticles(for: feed)) { article in
-                                HStack(spacing: 8) {
-                                    Circle()
-                                        .fill(article.isRead ? Color.clear : Color.blue)
-                                        .frame(width: 7, height: 7)
-                                    Text(article.title)
-                                        .lineLimit(2)
-                                        .font(.subheadline)
-                                        .foregroundStyle(article.isRead ? .secondary : .primary)
-                                }
-                                .contentShape(Rectangle())
-                                .tag(SidebarSelection.article(article.persistentModelID))
-                                .onTapGesture {
-                                    sidebarSelection = .article(article.persistentModelID)
-                                    if !article.isRead {
-                                        article.isRead = true
-                                    }
-                                }
-                                .contextMenu {
-                                    Button(article.isRead ? "Mark Unread" : "Mark Read") {
-                                        article.isRead.toggle()
-                                    }
-                                    Button(article.isStarred ? "Unstar" : "Star") {
-                                        article.isStarred.toggle()
-                                    }
-                                }
-                            }
-                        } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(feed.title.isEmpty ? feed.urlString : feed.title)
-                                Text(feed.urlString)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                sidebarSelection = .feed(feed.persistentModelID)
-                            }
-                            .contextMenu {
-                                Button("Edit") {
-                                    beginEdit(feed: feed)
-                                }
-                                Button("Refresh") {
-                                    Task { await refreshSingleFeed(feed) }
-                                }
-                                Button("Delete", role: .destructive) {
-                                    requestDeleteFeed(feed)
-                                }
-                            }
-                        }
-                        .tag(SidebarSelection.feed(feed.persistentModelID))
-                    }
-                    .onDelete(perform: deleteFeeds)
-                }
-            }
-            .navigationTitle("RZZ")
-        } detail: {
-            if let selectedArticle {
-                ArticleDetailView(article: selectedArticle)
-            } else if displayedArticles.isEmpty {
-                ContentUnavailableView(
-                    "No Articles",
-                    systemImage: "newspaper",
-                    description: Text("Select a feed and article to start reading.")
-                )
-            } else {
-                List {
-                    ForEach(displayedArticles) { article in
-                        ArticleRow(article: article)
-                            .onTapGesture {
-                                sidebarSelection = .article(article.persistentModelID)
-                                if !article.isRead {
-                                    article.isRead = true
-                                }
-                            }
-                    }
-                }
-                .navigationTitle(navigationTitle)
-            }
+            Divider()
+            scopeStatusBar
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -208,9 +134,9 @@ struct ContentView: View {
                 }
                 .disabled(isRefreshing || feeds.isEmpty)
 
-                if let selectedFeed {
+                if let selectedFeedForEditing {
                     Button {
-                        beginEdit(feed: selectedFeed)
+                        beginEdit(feed: selectedFeedForEditing)
                     } label: {
                         Label("Edit Feed", systemImage: "pencil")
                     }
@@ -218,8 +144,19 @@ struct ContentView: View {
             }
         }
         .onChange(of: articles.map(\.persistentModelID)) { _, newIDs in
-            if case .article(let selectedID) = sidebarSelection, !newIDs.contains(selectedID) {
-                sidebarSelection = .all
+            if let selectedArticleID, !newIDs.contains(selectedArticleID) {
+                self.selectedArticleID = nil
+            }
+        }
+        .onChange(of: feeds.map(\.persistentModelID)) { _, newFeedIDs in
+            selectedFeedIDs = selectedFeedIDs.intersection(Set(newFeedIDs))
+            if selectedFeedIDs.isEmpty {
+                isAllFeedsSelected = true
+            }
+        }
+        .onChange(of: displayedArticles.map(\.persistentModelID)) { _, visibleArticleIDs in
+            if let selectedArticleID, !visibleArticleIDs.contains(selectedArticleID) {
+                self.selectedArticleID = nil
             }
         }
         .sheet(isPresented: $showAddFeed) {
@@ -297,28 +234,146 @@ struct ContentView: View {
         }
     }
 
-    private var navigationTitle: String {
-        switch sidebarSelection {
-        case .starred:
-            return "Starred"
-        case .article(let articleID):
-            return articles.first(where: { $0.persistentModelID == articleID })?.feed?.title ?? "Article"
-        case .feed(let id):
-            return feeds.first(where: { $0.persistentModelID == id })?.title ?? "Feed"
-        default:
-            return "All Articles"
+    private var sidebarPane: some View {
+        VStack(spacing: 0) {
+            List {
+                Section("Feeds") {
+                    DisclosureGroup(isExpanded: $isFeedsExpanded) {
+                        ForEach(feeds) { feed in
+                            FeedScopeRow(
+                                title: feed.title.isEmpty ? feed.urlString : feed.title,
+                                subtitle: feed.urlString,
+                                isSelected: selectedFeedIDs.contains(feed.persistentModelID) && !isAllFeedsSelected,
+                                systemImage: "dot.radiowaves.left.and.right",
+                                onTap: { toggleFeedSelection(feed) }
+                            )
+                            .contextMenu {
+                                Button("Edit") {
+                                    beginEdit(feed: feed)
+                                }
+                                Button("Refresh") {
+                                    Task { await refreshSingleFeed(feed) }
+                                }
+                                Button("Delete", role: .destructive) {
+                                    requestDeleteFeed(feed)
+                                }
+                            }
+                        }
+                    } label: {
+                        FeedScopeRow(
+                            title: "All",
+                            subtitle: "All feeds",
+                            isSelected: isAllFeedsSelected || selectedFeedIDs.isEmpty,
+                            systemImage: "tray.full",
+                            onTap: selectAllFeeds
+                        )
+                    }
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Filter")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Articles", selection: $articleFilter) {
+                    Text("All").tag(ArticleFilter.all)
+                    Text("Starred").tag(ArticleFilter.starred)
+                }
+                .pickerStyle(.segmented)
+            }
+            .padding(12)
+            .background(.thinMaterial)
+        }
+        .navigationTitle("RZZ")
+    }
+
+    private var articleListPane: some View {
+        Group {
+            if displayedArticles.isEmpty {
+                ContentUnavailableView(
+                    "No Articles",
+                    systemImage: "newspaper",
+                    description: Text("Select All, one feed, or multiple feeds to view articles.")
+                )
+            } else {
+                List {
+                    ForEach(displayedArticles) { article in
+                        ArticleRow(article: article)
+                            .onTapGesture {
+                                selectedArticleID = article.persistentModelID
+                                if !article.isRead {
+                                    article.isRead = true
+                                }
+                            }
+                            .contextMenu {
+                                Button(article.isRead ? "Mark Unread" : "Mark Read") {
+                                    article.isRead.toggle()
+                                }
+                                Button(article.isStarred ? "Unstar" : "Star") {
+                                    article.isStarred.toggle()
+                                }
+                            }
+                    }
+                }
+                .navigationTitle(navigationTitle)
+            }
         }
     }
 
-    private var selectedFeed: Feed? {
-        switch sidebarSelection {
-        case .feed(let id):
-            return feeds.first(where: { $0.persistentModelID == id })
-        case .article(let articleID):
-            return articles.first(where: { $0.persistentModelID == articleID })?.feed
-        default:
-            return nil
+    private var scopeStatusBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: hasCustomFeedSelection ? "line.3.horizontal.decrease.circle.fill" : "tray.full.fill")
+                .foregroundStyle(hasCustomFeedSelection ? Color.accentColor : .secondary)
+            Text(feedScopeSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            if hasCustomFeedSelection {
+                Button("Reset to All") {
+                    selectAllFeeds()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.thinMaterial)
+    }
+
+    private var articleDetailPane: some View {
+        Group {
+            if let selectedArticle {
+                ArticleDetailView(article: selectedArticle)
+            } else {
+                ContentUnavailableView(
+                    "No Article Selected",
+                    systemImage: "doc.text.magnifyingglass",
+                    description: Text("Choose an article from the list to read.")
+                )
+            }
+        }
+    }
+
+    private var navigationTitle: String {
+        let filterTitle = articleFilter == .starred ? "Starred" : "Articles"
+
+        if isAllFeedsSelected || selectedFeedIDs.isEmpty {
+            return "All · \(filterTitle)"
+        }
+
+        if selectedFeeds.count == 1, let feed = selectedFeeds.first {
+            return "\(feed.title) · \(filterTitle)"
+        }
+
+        return "\(selectedFeeds.count) Feeds · \(filterTitle)"
+    }
+
+    private var selectedFeedForEditing: Feed? {
+        guard !isAllFeedsSelected, selectedFeeds.count == 1 else { return nil }
+        return selectedFeeds.first
     }
 
     @MainActor
@@ -341,7 +396,8 @@ struct ContentView: View {
         let feed = Feed(title: displayTitle, urlString: trimmedURL)
         applyProxyValues(values, to: feed)
         modelContext.insert(feed)
-        sidebarSelection = .feed(feed.persistentModelID)
+        selectedFeedIDs = [feed.persistentModelID]
+        isAllFeedsSelected = false
 
         await refreshSingleFeed(feed)
     }
@@ -376,16 +432,22 @@ struct ContentView: View {
 
     @MainActor
     private func refreshCurrentSelection() async {
-        switch sidebarSelection {
-        case .feed(let id):
-            guard let feed = feeds.first(where: { $0.persistentModelID == id }) else { return }
-            await refreshSingleFeed(feed)
-        case .article(let articleID):
-            guard let article = articles.first(where: { $0.persistentModelID == articleID }),
-                  let feed = article.feed else { return }
-            await refreshSingleFeed(feed)
-        case .all, .starred, .none:
+        guard let feedIDs = effectiveSelectedFeedIDs else {
             await refreshAllFeeds()
+            return
+        }
+
+        let selectedFeeds = feeds.filter { feedIDs.contains($0.persistentModelID) }
+        guard !selectedFeeds.isEmpty else {
+            await refreshAllFeeds()
+            return
+        }
+
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        for feed in selectedFeeds {
+            await refreshSingleFeed(feed, showGlobalSpinner: false)
         }
     }
 
@@ -469,25 +531,15 @@ struct ContentView: View {
     }
 
     private func deleteFeed(_ feed: Feed) {
-        switch sidebarSelection {
-        case .feed(let id):
-            if id == feed.persistentModelID {
-                sidebarSelection = .all
-            }
-        case .article(let articleID):
-            if feed.articles.contains(where: { $0.persistentModelID == articleID }) {
-                sidebarSelection = .all
-            }
-        default:
-            break
+        selectedFeedIDs.remove(feed.persistentModelID)
+        if selectedFeedIDs.isEmpty {
+            isAllFeedsSelected = true
+        }
+        if let selectedArticleID, feed.articles.contains(where: { $0.persistentModelID == selectedArticleID }) {
+            self.selectedArticleID = nil
         }
         modelContext.delete(feed)
         try? modelContext.save()
-    }
-
-    private func deleteFeeds(at offsets: IndexSet) {
-        let ids = offsets.map { feeds[$0].persistentModelID }
-        requestDeleteFeeds(ids: ids)
     }
 
     private func requestDeleteFeed(_ feed: Feed) {
@@ -564,19 +616,58 @@ struct ContentView: View {
         return true
     }
 
-    private func feedArticles(for feed: Feed) -> [Article] {
-        filteredArticles(feed.articles).sorted { lhs, rhs in
-            (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
+    private func toggleFeedSelection(_ feed: Feed) {
+        if isAllFeedsSelected {
+            isAllFeedsSelected = false
+            selectedFeedIDs = [feed.persistentModelID]
+            selectedArticleID = nil
+            return
         }
+
+        if selectedFeedIDs.contains(feed.persistentModelID) {
+            selectedFeedIDs.remove(feed.persistentModelID)
+        } else {
+            selectedFeedIDs.insert(feed.persistentModelID)
+        }
+
+        if selectedFeedIDs.isEmpty {
+            isAllFeedsSelected = true
+        }
+        selectedArticleID = nil
     }
 
-    private func filteredArticles(_ source: [Article]) -> [Article] {
-        switch sidebarSelection {
-        case .starred:
-            return source.filter(\.isStarred)
-        default:
-            return source
+    private func selectAllFeeds() {
+        isAllFeedsSelected = true
+        selectedFeedIDs.removeAll()
+        selectedArticleID = nil
+    }
+}
+
+private struct FeedScopeRow: View {
+    let title: String
+    let subtitle: String
+    let isSelected: Bool
+    let systemImage: String
+    let onTap: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
         }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
     }
 }
 
