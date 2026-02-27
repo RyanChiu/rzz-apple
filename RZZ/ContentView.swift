@@ -273,18 +273,24 @@ struct ContentView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Filter")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Picker("Articles", selection: $articleFilter) {
-                    Text("All").tag(ArticleFilter.all)
-                    Text("Starred").tag(ArticleFilter.starred)
+            VStack(alignment: .leading, spacing: 4) {
+                Picker("Article Filter", selection: $articleFilter) {
+                    Image(systemName: "doc.text")
+                        .tag(ArticleFilter.all)
+                        .help("Show all articles in the selected feeds")
+                    Image(systemName: "star.fill")
+                        .tag(ArticleFilter.starred)
+                        .help("Show only starred articles in the selected feeds")
                 }
+                .labelsHidden()
                 .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(maxWidth: 96)
+                .accessibilityLabel("Article Filter")
             }
-            .padding(12)
-            .background(.thinMaterial)
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
         }
         .navigationTitle("RZZ")
     }
