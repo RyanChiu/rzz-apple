@@ -31,6 +31,7 @@ final class Feed {
     var title: String = ""
     var urlString: String = ""
     var useProxy: Bool = false
+    var useProxyForContent: Bool = false
     var proxyTypeRaw: String = FeedProxyType.http.rawValue
     var proxyHost: String = ""
     var proxyPort: Int? = nil
@@ -60,6 +61,15 @@ final class Feed {
 
     var proxyConfiguration: FeedProxyConfiguration? {
         guard useProxy else { return nil }
+        return makeProxyConfiguration()
+    }
+
+    var contentProxyConfiguration: FeedProxyConfiguration? {
+        guard useProxyForContent else { return nil }
+        return makeProxyConfiguration()
+    }
+
+    private func makeProxyConfiguration() -> FeedProxyConfiguration? {
         let host = proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return nil }
         guard let port = proxyPort, (1...65535).contains(port) else { return nil }

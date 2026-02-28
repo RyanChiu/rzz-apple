@@ -15,6 +15,7 @@ private struct FeedEditDraft: Identifiable {
     let title: String
     let urlString: String
     let useProxy: Bool
+    let useProxyForContent: Bool
     let proxyType: FeedProxyType
     let proxyHost: String
     let proxyPort: Int?
@@ -26,6 +27,7 @@ private struct FeedFormValues {
     let title: String
     let urlString: String
     let useProxy: Bool
+    let useProxyForContent: Bool
     let proxyType: FeedProxyType
     let proxyHost: String
     let proxyPort: Int?
@@ -166,6 +168,7 @@ struct ContentView: View {
                 initialTitle: "",
                 initialURLString: "",
                 initialUseProxy: false,
+                initialUseProxyForContent: false,
                 initialProxyType: .http,
                 initialProxyHost: "",
                 initialProxyPort: nil,
@@ -184,6 +187,7 @@ struct ContentView: View {
                 initialTitle: draft.title,
                 initialURLString: draft.urlString,
                 initialUseProxy: draft.useProxy,
+                initialUseProxyForContent: draft.useProxyForContent,
                 initialProxyType: draft.proxyType,
                 initialProxyHost: draft.proxyHost,
                 initialProxyPort: draft.proxyPort,
@@ -245,6 +249,8 @@ struct ContentView: View {
                                 subtitle: feed.urlString,
                                 isSelected: selectedFeedIDs.contains(feed.persistentModelID) && !isAllFeedsSelected,
                                 systemImage: "dot.radiowaves.left.and.right",
+                                sourceProxyEnabled: feed.useProxy,
+                                contentProxyEnabled: feed.useProxyForContent,
                                 onTap: { toggleFeedSelection(feed) }
                             )
                             .contextMenu {
@@ -265,6 +271,8 @@ struct ContentView: View {
                             subtitle: "All feeds",
                             isSelected: isAllFeedsSelected || selectedFeedIDs.isEmpty,
                             systemImage: "tray.full",
+                            sourceProxyEnabled: false,
+                            contentProxyEnabled: false,
                             onTap: selectAllFeeds
                         )
                     }
@@ -304,15 +312,14 @@ struct ContentView: View {
                     description: Text("Select All, one feed, or multiple feeds to view articles.")
                 )
             } else {
-                List {
+                List(selection: $selectedArticleID) {
                     ForEach(displayedArticles) { article in
-                        ArticleRow(article: article)
-                            .onTapGesture {
-                                selectedArticleID = article.persistentModelID
-                                if !article.isRead {
-                                    article.isRead = true
-                                }
-                            }
+                        ArticleRow(
+                            article: article,
+                            isSelected: selectedArticleID == article.persistentModelID
+                        )
+                            .contentShape(Rectangle())
+                            .tag(article.persistentModelID)
                             .contextMenu {
                                 Button(article.isRead ? "Mark Unread" : "Mark Read") {
                                     article.isRead.toggle()
@@ -321,9 +328,21 @@ struct ContentView: View {
                                     article.isStarred.toggle()
                                 }
                             }
+                            .listRowBackground(
+                                (selectedArticleID == article.persistentModelID)
+                                ? Color.accentColor.opacity(0.16)
+                                : Color.clear
+                            )
                     }
                 }
                 .navigationTitle(navigationTitle)
+                .onChange(of: selectedArticleID) { _, newSelection in
+                    guard let newSelection else { return }
+                    guard let article = articles.first(where: { $0.persistentModelID == newSelection }) else { return }
+                    if !article.isRead {
+                        article.isRead = true
+                    }
+                }
             }
         }
     }
@@ -588,6 +607,7 @@ struct ContentView: View {
             title: feed.title,
             urlString: feed.urlString,
             useProxy: feed.useProxy,
+            useProxyForContent: feed.useProxyForContent,
             proxyType: feed.proxyType,
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
@@ -598,6 +618,7 @@ struct ContentView: View {
 
     private func applyProxyValues(_ values: FeedFormValues, to feed: Feed) {
         feed.useProxy = values.useProxy
+        feed.useProxyForContent = values.useProxyForContent
         feed.proxyType = values.proxyType
         feed.proxyHost = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
         feed.proxyPort = values.proxyPort
@@ -606,7 +627,7 @@ struct ContentView: View {
     }
 
     private func validateProxyValues(_ values: FeedFormValues) -> Bool {
-        guard values.useProxy else { return true }
+        guard values.useProxy || values.useProxyForContent else { return true }
 
         if values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             refreshError = "Proxy is enabled. Please input proxy host."
@@ -654,6 +675,8 @@ private struct FeedScopeRow: View {
     let subtitle: String
     let isSelected: Bool
     let systemImage: String
+    let sourceProxyEnabled: Bool
+    let contentProxyEnabled: Bool
     let onTap: () -> Void
 
     var body: some View {
@@ -671,6 +694,18 @@ private struct FeedScopeRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            if sourceProxyEnabled {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Feed access uses proxy")
+            }
+            if contentProxyEnabled {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Content access uses proxy")
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
@@ -679,6 +714,7 @@ private struct FeedScopeRow: View {
 
 private struct ArticleRow: View {
     @Bindable var article: Article
+    let isSelected: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -715,11 +751,32 @@ private struct ArticleRow: View {
             }
         }
         .padding(.vertical, 4)
+        .overlay(alignment: .leading) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 2)
+            }
+        }
     }
 }
 
 private struct ArticleDetailView: View {
+    private enum ContentLoadState {
+        case loading
+        case loaded
+        case fallbackSummary
+    }
+
     @Bindable var article: Article
+    @State private var isBodyLoading = false
+    @State private var showSkeleton = true
+    @State private var bodyHTML: String = ""
+    @State private var bodyLoadTask: Task<Void, Never>?
+    @State private var activeBodyLoadID = UUID()
+    @State private var contentPathUsesProxy = false
+    @State private var contentLoadState: ContentLoadState = .loading
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -754,32 +811,200 @@ private struct ArticleDetailView: View {
                     .foregroundStyle(.secondary)
             }
 
+            HStack(spacing: 8) {
+                proxyStatusPill(
+                    title: "Feed",
+                    usesProxy: article.feed?.useProxy ?? false
+                )
+                proxyStatusPill(
+                    title: "Content",
+                    usesProxy: contentPathUsesProxy
+                )
+                if contentLoadState == .fallbackSummary {
+                    statusPill(title: "Fallback", value: "Summary", icon: "arrow.uturn.backward.circle")
+                }
+            }
+
             Divider()
 
-            if article.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("No summary available.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            } else {
-                ArticleHTMLView(htmlBody: article.summary)
+            if bodyHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if isBodyLoading {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading content…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        ArticleContentSkeleton()
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Text("No content available.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    if isBodyLoading {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading content…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    ZStack(alignment: .topLeading) {
+                        ArticleHTMLView(htmlBody: bodyHTML)
+                        .opacity(showSkeleton ? 0.06 : 1.0)
+                        .animation(.easeInOut(duration: 0.18), value: showSkeleton)
+
+                        if showSkeleton {
+                            ArticleContentSkeleton()
+                                .transition(.opacity)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding()
         .navigationTitle("Article")
+        .onAppear {
+            reloadBodyHTML()
+        }
+        .onChange(of: article.persistentModelID) { _, _ in
+            reloadBodyHTML()
+        }
+        .onDisappear {
+            bodyLoadTask?.cancel()
+        }
+    }
+
+    private func reloadBodyHTML() {
+        bodyLoadTask?.cancel()
+        let loadID = UUID()
+        activeBodyLoadID = loadID
+
+        let summary = article.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackHTML = summary.isEmpty ? "<p>No summary available.</p>" : article.summary
+        let articleLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
+        let proxy = article.feed?.contentProxyConfiguration
+        let shouldUseProxyForContent = article.feed?.useProxyForContent ?? false
+
+        withAnimation(.easeInOut(duration: 0.12)) {
+            contentPathUsesProxy = shouldUseProxyForContent
+            contentLoadState = .loading
+            bodyHTML = ""
+            isBodyLoading = true
+            showSkeleton = true
+        }
+
+        guard let url = URL(string: articleLink), url.scheme?.hasPrefix("http") == true else {
+            withAnimation(.easeInOut(duration: 0.12)) {
+                contentLoadState = .fallbackSummary
+                bodyHTML = fallbackHTML
+                isBodyLoading = false
+                showSkeleton = false
+            }
+            return
+        }
+
+        bodyLoadTask = Task {
+            let selectedProxy: FeedProxyConfiguration? = shouldUseProxyForContent ? proxy : nil
+            let fetchedHTML = (try? await RSSService.fetchArticleHTML(from: url, proxy: selectedProxy))
+
+            await MainActor.run {
+                guard activeBodyLoadID == loadID else { return }
+                withAnimation(.easeInOut(duration: 0.12)) {
+                    contentLoadState = fetchedHTML == nil ? .fallbackSummary : .loaded
+                    bodyHTML = fetchedHTML ?? fallbackHTML
+                    isBodyLoading = false
+                    showSkeleton = false
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func proxyStatusPill(title: String, usesProxy: Bool) -> some View {
+        statusPill(
+            title: title,
+            value: usesProxy ? "Proxy" : "Direct",
+            icon: usesProxy ? "network.badge.shield.half.filled" : "network"
+        )
+    }
+
+    private func statusPill(title: String, value: String, icon: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.caption2)
+            Text("\(title): \(value)")
+                .font(.caption2)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.thinMaterial, in: Capsule())
+    }
+}
+
+private struct ArticleContentSkeleton: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.14))
+                .frame(height: 16)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(height: 14)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(height: 14)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(height: 14)
+                .frame(maxWidth: 260, alignment: .leading)
+
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.secondary.opacity(0.1))
+                .frame(height: 170)
+                .padding(.top, 6)
+
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(height: 14)
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(height: 14)
+                .frame(maxWidth: 220, alignment: .leading)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.trailing, 10)
     }
 }
 
 private struct ArticleHTMLView: View {
     let htmlBody: String
+    var onLoadingStateChange: (Bool) -> Void = { _ in }
 
     var body: some View {
-        HTMLWebView(html: htmlDocument)
+        HTMLWebView(html: htmlDocument, onLoadingStateChange: onLoadingStateChange)
             .background(Color.clear)
     }
 
     private var htmlDocument: String {
-        """
+        let lowercased = htmlBody.lowercased()
+        if lowercased.contains("<html") || lowercased.contains("<!doctype html") {
+            return htmlBody
+        }
+
+        return """
         <!doctype html>
         <html>
         <head>
@@ -817,27 +1042,92 @@ private struct ArticleHTMLView: View {
 #if os(macOS)
 private struct HTMLWebView: NSViewRepresentable {
     let html: String
+    var baseURL: URL? = nil
+    var onLoadingStateChange: (Bool) -> Void = { _ in }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onLoadingStateChange: onLoadingStateChange)
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView(frame: .zero)
         view.setValue(false, forKey: "drawsBackground")
+        view.navigationDelegate = context.coordinator
         return view
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        webView.loadHTMLString(html, baseURL: nil)
+        if context.coordinator.lastHTML != html {
+            context.coordinator.lastHTML = html
+            onLoadingStateChange(true)
+            webView.loadHTMLString(html, baseURL: baseURL)
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var lastHTML: String = ""
+        let onLoadingStateChange: (Bool) -> Void
+
+        init(onLoadingStateChange: @escaping (Bool) -> Void) {
+            self.onLoadingStateChange = onLoadingStateChange
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            onLoadingStateChange(false)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            onLoadingStateChange(false)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            onLoadingStateChange(false)
+        }
     }
 }
 #else
 private struct HTMLWebView: UIViewRepresentable {
     let html: String
+    var baseURL: URL? = nil
+    var onLoadingStateChange: (Bool) -> Void = { _ in }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onLoadingStateChange: onLoadingStateChange)
+    }
 
     func makeUIView(context: Context) -> WKWebView {
-        WKWebView(frame: .zero)
+        let view = WKWebView(frame: .zero)
+        view.navigationDelegate = context.coordinator
+        return view
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        webView.loadHTMLString(html, baseURL: nil)
+        if context.coordinator.lastHTML != html {
+            context.coordinator.lastHTML = html
+            onLoadingStateChange(true)
+            webView.loadHTMLString(html, baseURL: baseURL)
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var lastHTML: String = ""
+        let onLoadingStateChange: (Bool) -> Void
+
+        init(onLoadingStateChange: @escaping (Bool) -> Void) {
+            self.onLoadingStateChange = onLoadingStateChange
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            onLoadingStateChange(false)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            onLoadingStateChange(false)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            onLoadingStateChange(false)
+        }
     }
 }
 #endif
@@ -875,6 +1165,7 @@ private struct FeedFormView: View {
     @State private var title: String
     @State private var urlString: String
     @State private var useProxy: Bool
+    @State private var useProxyForContent: Bool
     @State private var proxyType: FeedProxyType
     @State private var proxyHost: String
     @State private var proxyPortString: String
@@ -886,6 +1177,7 @@ private struct FeedFormView: View {
     let initialTitle: String
     let initialURLString: String
     let initialUseProxy: Bool
+    let initialUseProxyForContent: Bool
     let initialProxyType: FeedProxyType
     let initialProxyHost: String
     let initialProxyPort: Int?
@@ -899,6 +1191,7 @@ private struct FeedFormView: View {
         initialTitle: String,
         initialURLString: String,
         initialUseProxy: Bool,
+        initialUseProxyForContent: Bool,
         initialProxyType: FeedProxyType,
         initialProxyHost: String,
         initialProxyPort: Int?,
@@ -911,6 +1204,7 @@ private struct FeedFormView: View {
         self.initialTitle = initialTitle
         self.initialURLString = initialURLString
         self.initialUseProxy = initialUseProxy
+        self.initialUseProxyForContent = initialUseProxyForContent
         self.initialProxyType = initialProxyType
         self.initialProxyHost = initialProxyHost
         self.initialProxyPort = initialProxyPort
@@ -920,6 +1214,7 @@ private struct FeedFormView: View {
         _title = State(initialValue: initialTitle)
         _urlString = State(initialValue: initialURLString)
         _useProxy = State(initialValue: initialUseProxy)
+        _useProxyForContent = State(initialValue: initialUseProxyForContent)
         _proxyType = State(initialValue: initialProxyType)
         _proxyHost = State(initialValue: initialProxyHost)
         _proxyPortString = State(initialValue: initialProxyPort.map(String.init) ?? "")
@@ -938,9 +1233,10 @@ private struct FeedFormView: View {
                     .autocorrectionDisabled()
 
                 Section("Network") {
-                    Toggle("Use Proxy", isOn: $useProxy)
+                    Toggle("Use Proxy for Feed URL Access", isOn: $useProxy)
+                    Toggle("Use Proxy for Content Access", isOn: $useProxyForContent)
 
-                    if useProxy {
+                    if useProxy || useProxyForContent {
                         Picker("Proxy Type", selection: $proxyType) {
                             ForEach(FeedProxyType.allCases) { type in
                                 Text(type.displayName).tag(type)
@@ -980,6 +1276,7 @@ private struct FeedFormView: View {
                                 title: title,
                                 urlString: urlString,
                                 useProxy: useProxy,
+                                useProxyForContent: useProxyForContent,
                                 proxyType: proxyType,
                                 proxyHost: proxyHost,
                                 proxyPort: Int(proxyPortString),

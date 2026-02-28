@@ -110,6 +110,31 @@ enum RSSService {
         }
     }
 
+    static func fetchArticleHTML(from url: URL, proxy: FeedProxyConfiguration? = nil) async throws -> String {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+
+        do {
+            let (data, response) = try await dataAndResponse(for: request, proxy: proxy, bypassSystemProxy: false)
+            return try parseHTMLResponse(data: data, response: response)
+        } catch {
+            if proxy == nil, let urlError = error as? URLError, urlError.code == .cannotFindHost {
+                let (data, response) = try await dataAndResponse(for: request, proxy: nil, bypassSystemProxy: true)
+                return try parseHTMLResponse(data: data, response: response)
+            }
+            throw error
+        }
+    }
+
     private static func dataAndResponse(
         for request: URLRequest,
         proxy: FeedProxyConfiguration?,
@@ -127,6 +152,26 @@ enum RSSService {
             throw RSSServiceError.badResponse
         }
         return try FeedParser.parse(data: data)
+    }
+
+    private static func parseHTMLResponse(data: Data, response: URLResponse) throws -> String {
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            if let http = response as? HTTPURLResponse {
+                throw RSSServiceError.httpStatus(http.statusCode)
+            }
+            throw RSSServiceError.badResponse
+        }
+
+        if let html = String(data: data, encoding: .utf8), !html.isEmpty {
+            return html
+        }
+        if let html = String(data: data, encoding: .unicode), !html.isEmpty {
+            return html
+        }
+        if let html = String(data: data, encoding: .isoLatin1), !html.isEmpty {
+            return html
+        }
+        throw RSSServiceError.invalidData
     }
 
     private static func describeNetworkError(_ error: Error) -> String {
