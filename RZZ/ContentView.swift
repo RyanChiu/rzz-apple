@@ -1,6 +1,11 @@
 import SwiftUI
 import SwiftData
 import WebKit
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 private enum ArticleFilter: String, CaseIterable, Identifiable {
     case all
@@ -43,9 +48,12 @@ private struct FeedDeletionRequest: Identifiable {
 }
 
 struct ContentView: View {
+    @Binding var isAppLocked: Bool
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\Feed.createdAt, order: .reverse)]) private var feeds: [Feed]
     @Query(sort: [SortDescriptor(\Article.publishedAt, order: .reverse), SortDescriptor(\Article.createdAt, order: .reverse)]) private var articles: [Article]
+    @AppStorage("app_lock_enabled") private var appLockEnabled = false
+    @AppStorage("app_lock_pin_hash") private var appLockPINHash = ""
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
@@ -57,6 +65,7 @@ struct ContentView: View {
     @State private var isRefreshing = false
     @State private var refreshError: String?
     @State private var pendingDeletionRequest: FeedDeletionRequest?
+    @State private var showSecuritySettings = false
 
     private var displayedArticles: [Article] {
         var scoped = articles
@@ -109,6 +118,10 @@ struct ContentView: View {
     }
 
     var body: some View {
+        bodyWithLockLifecycle
+    }
+
+    private var baseLayout: some View {
         VStack(spacing: 0) {
             NavigationSplitView {
                 sidebarPane
@@ -121,121 +134,203 @@ struct ContentView: View {
             Divider()
             scopeStatusBar
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    showAddFeed = true
-                } label: {
-                    Label("Add Feed", systemImage: "plus")
-                }
+    }
 
-                Button {
-                    Task { await refreshCurrentSelection() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(isRefreshing || feeds.isEmpty)
-
-                if let selectedFeedForEditing {
+    private var bodyWithToolbar: some View {
+        baseLayout
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
                     Button {
-                        beginEdit(feed: selectedFeedForEditing)
+                        guard !shouldShowLockScreen else { return }
+                        showAddFeed = true
                     } label: {
-                        Label("Edit Feed", systemImage: "pencil")
+                        Label("Add Feed", systemImage: "plus")
+                    }
+                    .disabled(shouldShowLockScreen)
+
+                    Button {
+                        guard !shouldShowLockScreen else { return }
+                        Task { await refreshCurrentSelection() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(shouldShowLockScreen || isRefreshing || feeds.isEmpty)
+
+                    if let selectedFeedForEditing {
+                        Button {
+                            guard !shouldShowLockScreen else { return }
+                            beginEdit(feed: selectedFeedForEditing)
+                        } label: {
+                            Label("Edit Feed", systemImage: "pencil")
+                        }
+                        .disabled(shouldShowLockScreen)
+                    }
+
+                    Button {
+                        guard !shouldShowLockScreen else { return }
+                        showSecuritySettings = true
+                    } label: {
+                        Label("Security", systemImage: "lock")
+                    }
+                    .disabled(shouldShowLockScreen)
+                }
+            }
+    }
+
+    private var bodyWithSelectionObservers: some View {
+        bodyWithToolbar
+            .onChange(of: articles.map(\.persistentModelID)) { _, newIDs in
+                if let selectedArticleID, !newIDs.contains(selectedArticleID) {
+                    self.selectedArticleID = nil
+                }
+            }
+            .onChange(of: feeds.map(\.persistentModelID)) { _, newFeedIDs in
+                selectedFeedIDs = selectedFeedIDs.intersection(Set(newFeedIDs))
+                if selectedFeedIDs.isEmpty {
+                    isAllFeedsSelected = true
+                }
+            }
+            .onChange(of: displayedArticles.map(\.persistentModelID)) { _, visibleArticleIDs in
+                if let selectedArticleID, !visibleArticleIDs.contains(selectedArticleID) {
+                    self.selectedArticleID = nil
+                }
+            }
+    }
+
+    private var bodyWithSheets: some View {
+        bodyWithSelectionObservers
+            .sheet(isPresented: $showAddFeed) {
+                FeedFormView(
+                    modeTitle: "Add Feed",
+                    saveButtonTitle: "Save",
+                    initialTitle: "",
+                    initialURLString: "",
+                    initialUseProxy: false,
+                    initialUseProxyForContent: false,
+                    initialProxyType: .http,
+                    initialProxyHost: "",
+                    initialProxyPort: nil,
+                    initialProxyUsername: "",
+                    initialProxyPassword: ""
+                ) { values in
+                    Task {
+                        await addFeed(values: values)
                     }
                 }
             }
-        }
-        .onChange(of: articles.map(\.persistentModelID)) { _, newIDs in
-            if let selectedArticleID, !newIDs.contains(selectedArticleID) {
-                self.selectedArticleID = nil
-            }
-        }
-        .onChange(of: feeds.map(\.persistentModelID)) { _, newFeedIDs in
-            selectedFeedIDs = selectedFeedIDs.intersection(Set(newFeedIDs))
-            if selectedFeedIDs.isEmpty {
-                isAllFeedsSelected = true
-            }
-        }
-        .onChange(of: displayedArticles.map(\.persistentModelID)) { _, visibleArticleIDs in
-            if let selectedArticleID, !visibleArticleIDs.contains(selectedArticleID) {
-                self.selectedArticleID = nil
-            }
-        }
-        .sheet(isPresented: $showAddFeed) {
-            FeedFormView(
-                modeTitle: "Add Feed",
-                saveButtonTitle: "Save",
-                initialTitle: "",
-                initialURLString: "",
-                initialUseProxy: false,
-                initialUseProxyForContent: false,
-                initialProxyType: .http,
-                initialProxyHost: "",
-                initialProxyPort: nil,
-                initialProxyUsername: "",
-                initialProxyPassword: ""
-            ) { values in
-                Task {
-                    await addFeed(values: values)
-                }
-            }
-        }
-        .sheet(item: $editDraft) { draft in
-            FeedFormView(
-                modeTitle: "Edit Feed",
-                saveButtonTitle: "Update",
-                initialTitle: draft.title,
-                initialURLString: draft.urlString,
-                initialUseProxy: draft.useProxy,
-                initialUseProxyForContent: draft.useProxyForContent,
-                initialProxyType: draft.proxyType,
-                initialProxyHost: draft.proxyHost,
-                initialProxyPort: draft.proxyPort,
-                initialProxyUsername: draft.proxyUsername,
-                initialProxyPassword: draft.proxyPassword
-            ) { values in
-                Task {
-                    await updateFeed(feedID: draft.feedID, values: values)
-                }
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if isRefreshing {
-                ProgressView("Refreshing feeds...")
-                    .padding(12)
-                    .background(.thinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .padding(.bottom, 12)
-            }
-        }
-        .alert("Refresh Error", isPresented: Binding(get: {
-            refreshError != nil
-        }, set: { newValue in
-            if !newValue { refreshError = nil }
-        })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(refreshError ?? "Unknown error")
-        }
-        .confirmationDialog(
-            "Delete Feed?",
-            isPresented: Binding(
-                get: { pendingDeletionRequest != nil },
-                set: { newValue in
-                    if !newValue {
-                        pendingDeletionRequest = nil
+            .sheet(item: $editDraft) { draft in
+                FeedFormView(
+                    modeTitle: "Edit Feed",
+                    saveButtonTitle: "Update",
+                    initialTitle: draft.title,
+                    initialURLString: draft.urlString,
+                    initialUseProxy: draft.useProxy,
+                    initialUseProxyForContent: draft.useProxyForContent,
+                    initialProxyType: draft.proxyType,
+                    initialProxyHost: draft.proxyHost,
+                    initialProxyPort: draft.proxyPort,
+                    initialProxyUsername: draft.proxyUsername,
+                    initialProxyPassword: draft.proxyPassword
+                ) { values in
+                    Task {
+                        await updateFeed(feedID: draft.feedID, values: values)
                     }
                 }
-            ),
-            presenting: pendingDeletionRequest
-        ) { request in
-            Button(request.actionTitle, role: .destructive) {
-                performDeletion(request)
             }
-            Button("Cancel", role: .cancel) {}
-        } message: { request in
-            Text(request.message)
-        }
+            .sheet(isPresented: $showSecuritySettings) {
+                AppLockSettingsView(
+                    isEnabled: $appLockEnabled,
+                    pinHash: $appLockPINHash
+                )
+            }
+    }
+
+    private var bodyWithOverlays: some View {
+        bodyWithSheets
+            .overlay(alignment: .bottom) {
+                if isRefreshing {
+                    ProgressView("Refreshing feeds...")
+                        .padding(12)
+                        .background(.thinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .padding(.bottom, 12)
+                }
+            }
+            .overlay {
+                if shouldShowLockScreen {
+                    AppLockScreenView { pin in
+                        unlockIfValid(pin)
+                    }
+                }
+            }
+    }
+
+    private var bodyWithAlerts: some View {
+        bodyWithOverlays
+            .alert("Refresh Error", isPresented: Binding(get: {
+                refreshError != nil
+            }, set: { newValue in
+                if !newValue { refreshError = nil }
+            })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(refreshError ?? "Unknown error")
+            }
+            .confirmationDialog(
+                "Delete Feed?",
+                isPresented: Binding(
+                    get: { pendingDeletionRequest != nil },
+                    set: { newValue in
+                        if !newValue {
+                            pendingDeletionRequest = nil
+                        }
+                    }
+                ),
+                presenting: pendingDeletionRequest
+            ) { request in
+                Button(request.actionTitle, role: .destructive) {
+                    performDeletion(request)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { request in
+                Text(request.message)
+            }
+    }
+
+    private var bodyWithLockLifecycle: some View {
+        bodyWithAlerts
+            .onChange(of: appLockEnabled) { _, newValue in
+                if !newValue {
+                    isAppLocked = false
+                }
+            }
+            .onChange(of: appLockPINHash) { _, newValue in
+                if newValue.isEmpty {
+                    isAppLocked = false
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: appWillResignActiveNotification)) { _ in
+                guard appLockEnabled, !appLockPINHash.isEmpty else { return }
+                isAppLocked = true
+            }
+    }
+
+    private var shouldShowLockScreen: Bool {
+        appLockEnabled && !appLockPINHash.isEmpty && isAppLocked
+    }
+
+    private func unlockIfValid(_ pin: String) -> Bool {
+        guard AppLockSecurity.verifyPIN(pin, storedHash: appLockPINHash) else { return false }
+        isAppLocked = false
+        return true
+    }
+
+    private var appWillResignActiveNotification: Notification.Name {
+        #if os(macOS)
+        NSApplication.willResignActiveNotification
+        #else
+        UIApplication.willResignActiveNotification
+        #endif
     }
 
     private var sidebarPane: some View {
@@ -1294,6 +1389,6 @@ private struct FeedFormView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(isAppLocked: .constant(false))
         .modelContainer(for: [Feed.self, Article.self], inMemory: true)
 }
