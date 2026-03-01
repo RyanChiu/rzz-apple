@@ -25,59 +25,111 @@ struct AppLockSettingsView: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var draftIsEnabled: Bool
+    @State private var draftPINHash: String
     @State private var currentPIN = ""
     @State private var newPIN = ""
     @State private var confirmPIN = ""
     @State private var message: String?
     @State private var isErrorMessage = false
 
+    init(isEnabled: Binding<Bool>, pinHash: Binding<String>) {
+        _isEnabled = isEnabled
+        _pinHash = pinHash
+        _draftIsEnabled = State(initialValue: isEnabled.wrappedValue)
+        _draftPINHash = State(initialValue: pinHash.wrappedValue)
+    }
+
     private var hasExistingPIN: Bool {
-        !pinHash.isEmpty
+        !draftPINHash.isEmpty
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("App Lock") {
-                    Toggle("Enable lock when re-entering app", isOn: $isEnabled)
-                    Text("When enabled, re-entering RZZ requires a 4-6 character PIN (letters or digits).")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section(hasExistingPIN ? "Change PIN" : "Create PIN") {
-                    if hasExistingPIN {
-                        SecureField("Current PIN", text: $currentPIN)
-                            .textContentType(.password)
-                    }
-
-                    SecureField("New PIN (4-6 letters/digits)", text: $newPIN)
-                        .textContentType(.password)
-                    SecureField("Confirm New PIN", text: $confirmPIN)
-                        .textContentType(.password)
-
-                    Button(hasExistingPIN ? "Update PIN" : "Save PIN") {
-                        savePIN()
-                    }
-                    .disabled(!canSavePIN)
-                }
-
-                if let message {
-                    Section {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(isErrorMessage ? .red : .secondary)
-                    }
-                }
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text("Security")
+                    .font(.headline)
+                Spacer()
             }
-            .navigationTitle("Security")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+            settingsForm
+                .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Done") {
+                    applyDraftAndDismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 560)
+        #else
+        NavigationStack {
+            settingsForm
+                .navigationTitle("Security")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            applyDraftAndDismiss()
+                        }
+                    }
+                }
+        }
+        .frame(minWidth: 430, minHeight: 360)
+        #endif
+    }
+
+    private var settingsForm: some View {
+        Form {
+            Section("App Lock") {
+                Toggle("Enable lock when re-entering app", isOn: $draftIsEnabled)
+                Text("When enabled, re-entering RZZ requires a 4-6 character PIN (letters or digits).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section(hasExistingPIN ? "Change PIN" : "Create PIN") {
+                if hasExistingPIN {
+                    SecureField("Current PIN", text: $currentPIN)
+                        .textContentType(.password)
+                }
+
+                SecureField("New PIN (4-6 chars)", text: $newPIN)
+                    .textContentType(.password)
+                SecureField("Confirm New PIN", text: $confirmPIN)
+                    .textContentType(.password)
+
+                Button(hasExistingPIN ? "Update PIN" : "Save PIN") {
+                    savePIN()
+                }
+                .disabled(!canSavePIN)
+            }
+
+            if let message {
+                Section {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(isErrorMessage ? .red : .secondary)
                 }
             }
         }
-        .frame(minWidth: 430, minHeight: 360)
+    }
+
+    private func applyDraftAndDismiss() {
+        isEnabled = draftIsEnabled
+        pinHash = draftPINHash
+        dismiss()
     }
 
     private var canSavePIN: Bool {
@@ -96,13 +148,13 @@ struct AppLockSettingsView: View {
             setMessage("New PIN and confirmation do not match.", error: true)
             return
         }
-        if hasExistingPIN && !AppLockSecurity.verifyPIN(currentPIN, storedHash: pinHash) {
+        if hasExistingPIN && !AppLockSecurity.verifyPIN(currentPIN, storedHash: draftPINHash) {
             setMessage("Current PIN is incorrect.", error: true)
             return
         }
 
-        pinHash = AppLockSecurity.hashPIN(newPIN)
-        setMessage("PIN updated.", error: false)
+        draftPINHash = AppLockSecurity.hashPIN(newPIN)
+        setMessage("PIN updated. Click Done to apply.", error: false)
         currentPIN = ""
         newPIN = ""
         confirmPIN = ""

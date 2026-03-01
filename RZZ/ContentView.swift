@@ -217,6 +217,9 @@ struct ContentView: View {
                         await addFeed(values: values)
                     }
                 }
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
             }
             .sheet(item: $editDraft) { draft in
                 FeedFormView(
@@ -236,12 +239,18 @@ struct ContentView: View {
                         await updateFeed(feedID: draft.feedID, values: values)
                     }
                 }
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
             }
             .sheet(isPresented: $showSecuritySettings) {
                 AppLockSettingsView(
                     isEnabled: $appLockEnabled,
                     pinHash: $appLockPINHash
                 )
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
             }
     }
 
@@ -1318,73 +1327,110 @@ private struct FeedFormView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                TextField("Display Name (Optional)", text: $title)
-                TextField("Feed URL", text: $urlString)
-                #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                #endif
-                    .autocorrectionDisabled()
-
-                Section("Network") {
-                    Toggle("Use Proxy for Feed URL Access", isOn: $useProxy)
-                    Toggle("Use Proxy for Content Access", isOn: $useProxyForContent)
-
-                    if useProxy || useProxyForContent {
-                        Picker("Proxy Type", selection: $proxyType) {
-                            ForEach(FeedProxyType.allCases) { type in
-                                Text(type.displayName).tag(type)
-                            }
-                        }
-
-                        TextField("Proxy Host", text: $proxyHost)
-                        #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                        #endif
-                            .autocorrectionDisabled()
-
-                        TextField("Proxy Port", text: $proxyPortString)
-                        #if os(iOS)
-                            .keyboardType(.numberPad)
-                        #endif
-
-                        TextField("Proxy Username (Optional)", text: $proxyUsername)
-                        #if os(iOS)
-                            .textInputAutocapitalization(.never)
-                        #endif
-                            .autocorrectionDisabled()
-
-                        SecureField("Proxy Password (Optional)", text: $proxyPassword)
-                    }
-                }
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text(modeTitle)
+                    .font(.headline)
+                Spacer()
             }
-            .navigationTitle(modeTitle)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+            formContent
+                .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(saveButtonTitle) {
+                    saveAndDismiss()
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(saveButtonTitle) {
-                        onSave(
-                            FeedFormValues(
-                                title: title,
-                                urlString: urlString,
-                                useProxy: useProxy,
-                                useProxyForContent: useProxyForContent,
-                                proxyType: proxyType,
-                                proxyHost: proxyHost,
-                                proxyPort: Int(proxyPortString),
-                                proxyUsername: proxyUsername,
-                                proxyPassword: proxyPassword
-                            )
-                        )
-                        dismiss()
+                .keyboardShortcut(.defaultAction)
+                .disabled(urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(12)
+        }
+        .frame(width: 620)
+        #else
+        NavigationStack {
+            formContent
+                .navigationTitle(modeTitle)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
                     }
-                    .disabled(urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(saveButtonTitle) {
+                            saveAndDismiss()
+                        }
+                        .disabled(urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+        }
+        #endif
+    }
+
+    private var formContent: some View {
+        Form {
+            TextField("Display Name (Optional)", text: $title)
+            TextField("Feed URL", text: $urlString)
+            #if os(iOS)
+                .textInputAutocapitalization(.never)
+            #endif
+                .autocorrectionDisabled()
+
+            Section("Network") {
+                Toggle("Use Proxy for Feed URL Access", isOn: $useProxy)
+                Toggle("Use Proxy for Content Access", isOn: $useProxyForContent)
+
+                if useProxy || useProxyForContent {
+                    Picker("Proxy Type", selection: $proxyType) {
+                        ForEach(FeedProxyType.allCases) { type in
+                            Text(type.displayName).tag(type)
+                        }
+                    }
+
+                    TextField("Proxy Host", text: $proxyHost)
+                    #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                    #endif
+                        .autocorrectionDisabled()
+
+                    TextField("Proxy Port", text: $proxyPortString)
+                    #if os(iOS)
+                        .keyboardType(.numberPad)
+                    #endif
+
+                    TextField("Proxy Username (Optional)", text: $proxyUsername)
+                    #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                    #endif
+                        .autocorrectionDisabled()
+
+                    SecureField("Proxy Password (Optional)", text: $proxyPassword)
                 }
             }
         }
+    }
+
+    private func saveAndDismiss() {
+        onSave(
+            FeedFormValues(
+                title: title,
+                urlString: urlString,
+                useProxy: useProxy,
+                useProxyForContent: useProxyForContent,
+                proxyType: proxyType,
+                proxyHost: proxyHost,
+                proxyPort: Int(proxyPortString),
+                proxyUsername: proxyUsername,
+                proxyPassword: proxyPassword
+            )
+        )
+        dismiss()
     }
 }
 
