@@ -451,6 +451,30 @@ struct ContentView: View {
         }
     }
 
+    private var activeFeedStats: (feedTitle: String, readCount: Int, unreadCount: Int, allCount: Int)? {
+        guard let feed = selectedArticle?.feed else { return nil }
+        let feedID = feed.persistentModelID
+        let feedArticles = articles.filter { $0.feed?.persistentModelID == feedID }
+        guard !feedArticles.isEmpty else { return nil }
+
+        let readCount = feedArticles.filter(\.isRead).count
+        let allCount = feedArticles.count
+        let unreadCount = allCount - readCount
+        let title = feed.title.isEmpty ? feed.urlString : feed.title
+
+        return (title, readCount, unreadCount, allCount)
+    }
+
+    private var shouldShowFeedTitleInTitleStats: Bool {
+        let activeFeedScopeCount: Int = {
+            if isAllFeedsSelected || selectedFeedIDs.isEmpty {
+                return feeds.count
+            }
+            return selectedFeeds.count
+        }()
+        return activeFeedScopeCount > 1
+    }
+
     private var scopeStatusBar: some View {
         HStack(spacing: 10) {
             Image(systemName: hasCustomFeedSelection ? "line.3.horizontal.decrease.circle.fill" : "tray.full.fill")
@@ -465,6 +489,16 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            }
+
+            if let stats = activeFeedStats {
+                Divider()
+                    .frame(height: 14)
+                Text("R \(stats.readCount) · U \(stats.unreadCount) · A \(stats.allCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 12)
