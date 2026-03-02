@@ -54,6 +54,12 @@ struct ContentView: View {
     @Query(sort: [SortDescriptor(\Article.publishedAt, order: .reverse), SortDescriptor(\Article.createdAt, order: .reverse)]) private var articles: [Article]
     @AppStorage("app_lock_enabled") private var appLockEnabled = false
     @AppStorage("app_lock_pin_hash") private var appLockPINHash = ""
+    @AppStorage("last_feed_scope_all") private var lastFeedScopeAll = true
+    @AppStorage("last_selected_feed_uuids") private var lastSelectedFeedUUIDsCSV = ""
+    @AppStorage("last_article_filter") private var lastArticleFilterRaw = ArticleFilter.all.rawValue
+    @AppStorage("last_selected_article_uuid") private var lastSelectedArticleUUIDString = ""
+    @AppStorage("last_selected_article_uuid_all") private var lastSelectedArticleUUIDAllString = ""
+    @AppStorage("last_selected_article_uuid_starred") private var lastSelectedArticleUUIDStarredString = ""
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
@@ -66,24 +72,10 @@ struct ContentView: View {
     @State private var refreshError: String?
     @State private var pendingDeletionRequest: FeedDeletionRequest?
     @State private var showSecuritySettings = false
+    @State private var didRestorePersistedUIState = false
 
     private var displayedArticles: [Article] {
-        var scoped = articles
-
-        if let feedIDs = effectiveSelectedFeedIDs {
-            scoped = scoped.filter { article in
-                guard let feedID = article.feed?.persistentModelID else { return false }
-                return feedIDs.contains(feedID)
-            }
-        }
-
-        if articleFilter == .starred {
-            scoped = scoped.filter(\.isStarred)
-        }
-
-        return scoped.sorted { lhs, rhs in
-            (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
-        }
+        groupedDisplayedArticles.flatMap(\.articles)
     }
 
     private var effectiveSelectedFeedIDs: Set<PersistentIdentifier>? {
@@ -93,6 +85,30 @@ struct ContentView: View {
 
     private var selectedFeeds: [Feed] {
         feeds.filter { selectedFeedIDs.contains($0.persistentModelID) }
+    }
+
+    private var orderedActiveFeeds: [Feed] {
+        if isAllFeedsSelected || selectedFeedIDs.isEmpty {
+            return feeds
+        }
+        return feeds.filter { selectedFeedIDs.contains($0.persistentModelID) }
+    }
+
+    private var groupedDisplayedArticles: [(feed: Feed, articles: [Article])] {
+        orderedActiveFeeds.compactMap { feed in
+            var items = feed.articles
+            if articleFilter == .starred {
+                items = items.filter(\.isStarred)
+            }
+            items.sort { lhs, rhs in
+                (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
+            }
+            return items.isEmpty ? nil : (feed, items)
+        }
+    }
+
+    private var shouldGroupArticleListByFeed: Bool {
+        isAllFeedsSelected || selectedFeeds.count > 1
     }
 
     private var hasCustomFeedSelection: Bool {
@@ -183,17 +199,32 @@ struct ContentView: View {
                 if let selectedArticleID, !newIDs.contains(selectedArticleID) {
                     self.selectedArticleID = nil
                 }
+                restorePersistedUIStateIfNeeded()
             }
             .onChange(of: feeds.map(\.persistentModelID)) { _, newFeedIDs in
                 selectedFeedIDs = selectedFeedIDs.intersection(Set(newFeedIDs))
                 if selectedFeedIDs.isEmpty {
                     isAllFeedsSelected = true
                 }
+                restorePersistedUIStateIfNeeded()
             }
             .onChange(of: displayedArticles.map(\.persistentModelID)) { _, visibleArticleIDs in
                 if let selectedArticleID, !visibleArticleIDs.contains(selectedArticleID) {
                     self.selectedArticleID = nil
                 }
+            }
+            .onChange(of: isAllFeedsSelected) { _, _ in
+                persistFeedScopeSelection()
+            }
+            .onChange(of: selectedFeedIDs) { _, _ in
+                persistFeedScopeSelection()
+            }
+            .onChange(of: articleFilter) { _, _ in
+                persistArticleFilterSelection()
+                handleArticleSelectionAfterFilterChange()
+            }
+            .onAppear {
+                restorePersistedUIStateIfNeeded()
             }
     }
 
@@ -416,39 +447,77 @@ struct ContentView: View {
                     description: Text("Select All, one feed, or multiple feeds to view articles.")
                 )
             } else {
-                List(selection: $selectedArticleID) {
-                    ForEach(displayedArticles) { article in
-                        ArticleRow(
-                            article: article,
-                            isSelected: selectedArticleID == article.persistentModelID
-                        )
-                            .contentShape(Rectangle())
-                            .tag(article.persistentModelID)
-                            .contextMenu {
-                                Button(article.isRead ? "Mark Unread" : "Mark Read") {
-                                    article.isRead.toggle()
-                                }
-                                Button(article.isStarred ? "Unstar" : "Star") {
-                                    article.isStarred.toggle()
+                ScrollViewReader { scrollProxy in
+                    List(selection: $selectedArticleID) {
+                        if shouldGroupArticleListByFeed {
+                            ForEach(groupedDisplayedArticles, id: \.feed.persistentModelID) { group in
+                                Section {
+                                    ForEach(group.articles) { article in
+                                        articleListRow(article)
+                                    }
+                                } header: {
+                                    Text(group.feed.title.isEmpty ? group.feed.urlString : group.feed.title)
+                                        .textCase(nil)
                                 }
                             }
-                            .listRowBackground(
-                                (selectedArticleID == article.persistentModelID)
-                                ? Color.accentColor.opacity(0.16)
-                                : Color.clear
-                            )
+                        } else {
+                            ForEach(displayedArticles) { article in
+                                articleListRow(article)
+                            }
+                        }
                     }
-                }
-                .navigationTitle(navigationTitle)
-                .onChange(of: selectedArticleID) { _, newSelection in
-                    guard let newSelection else { return }
-                    guard let article = articles.first(where: { $0.persistentModelID == newSelection }) else { return }
-                    if !article.isRead {
-                        article.isRead = true
+                    .navigationTitle(navigationTitle)
+                    .onAppear {
+                        scrollSelectedArticleIntoView(using: scrollProxy)
+                    }
+                    .onChange(of: articleFilter) { _, _ in
+                        scrollSelectedArticleIntoView(using: scrollProxy)
+                    }
+                    .onChange(of: displayedArticles.map(\.persistentModelID)) { _, _ in
+                        scrollSelectedArticleIntoView(using: scrollProxy)
+                    }
+                    .onChange(of: selectedArticleID) { _, newSelection in
+                    if let newSelection,
+                       let article = articles.first(where: { $0.persistentModelID == newSelection }) {
+                        lastSelectedArticleUUIDString = article.id.uuidString
+                        persistArticleSelectionForCurrentFilter(articleID: article.id)
+                    } else {
+                        // Keep previous per-filter selection so switching filters can restore context.
+                    }
+
+                        guard let newSelection else { return }
+                        guard let article = articles.first(where: { $0.persistentModelID == newSelection }) else { return }
+                        if !article.isRead {
+                            article.isRead = true
+                        }
                     }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func articleListRow(_ article: Article) -> some View {
+        ArticleRow(
+            article: article,
+            isSelected: selectedArticleID == article.persistentModelID
+        )
+            .contentShape(Rectangle())
+            .id(article.persistentModelID)
+            .tag(article.persistentModelID)
+            .contextMenu {
+                Button(article.isRead ? "Mark Unread" : "Mark Read") {
+                    article.isRead.toggle()
+                }
+                Button(article.isStarred ? "Unstar" : "Star") {
+                    article.isStarred.toggle()
+                }
+            }
+            .listRowBackground(
+                (selectedArticleID == article.persistentModelID)
+                ? Color.accentColor.opacity(0.16)
+                : Color.clear
+            )
     }
 
     private var activeFeedStats: (feedTitle: String, readCount: Int, unreadCount: Int, allCount: Int)? {
@@ -463,16 +532,6 @@ struct ContentView: View {
         let title = feed.title.isEmpty ? feed.urlString : feed.title
 
         return (title, readCount, unreadCount, allCount)
-    }
-
-    private var shouldShowFeedTitleInTitleStats: Bool {
-        let activeFeedScopeCount: Int = {
-            if isAllFeedsSelected || selectedFeedIDs.isEmpty {
-                return feeds.count
-            }
-            return selectedFeeds.count
-        }()
-        return activeFeedScopeCount > 1
     }
 
     private var scopeStatusBar: some View {
@@ -537,6 +596,140 @@ struct ContentView: View {
     private var selectedFeedForEditing: Feed? {
         guard !isAllFeedsSelected, selectedFeeds.count == 1 else { return nil }
         return selectedFeeds.first
+    }
+
+    private func restoreLastSelectedArticleIfPossible() {
+        guard selectedArticleID == nil else { return }
+        let candidate = selectedArticleUUIDForCurrentFilter()
+        guard let uuid = UUID(uuidString: candidate) else { return }
+        guard let article = articles.first(where: { $0.id == uuid }) else { return }
+        guard displayedArticles.contains(where: { $0.persistentModelID == article.persistentModelID }) else { return }
+        selectedArticleID = article.persistentModelID
+    }
+
+    private func restorePersistedUIStateIfNeeded() {
+        guard !didRestorePersistedUIState else { return }
+        guard !feeds.isEmpty else { return }
+
+        restoreArticleFilterSelectionIfPossible()
+        restoreFeedScopeSelectionIfPossible()
+        restoreLastSelectedArticleIfPossible()
+        didRestorePersistedUIState = true
+    }
+
+    private func persistFeedScopeSelection() {
+        lastFeedScopeAll = isAllFeedsSelected || selectedFeedIDs.isEmpty
+        if lastFeedScopeAll {
+            lastSelectedFeedUUIDsCSV = ""
+            return
+        }
+
+        let selectedUUIDs = feeds
+            .filter { selectedFeedIDs.contains($0.persistentModelID) }
+            .map(\.id.uuidString)
+        lastSelectedFeedUUIDsCSV = selectedUUIDs.joined(separator: ",")
+    }
+
+    private func restoreFeedScopeSelectionIfPossible() {
+        guard !lastFeedScopeAll else {
+            isAllFeedsSelected = true
+            selectedFeedIDs.removeAll()
+            return
+        }
+
+        let raw = lastSelectedFeedUUIDsCSV.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            isAllFeedsSelected = true
+            selectedFeedIDs.removeAll()
+            return
+        }
+
+        let targetUUIDs = Set(raw.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+        guard !targetUUIDs.isEmpty else {
+            isAllFeedsSelected = true
+            selectedFeedIDs.removeAll()
+            return
+        }
+
+        let restoredIDs = Set(
+            feeds
+                .filter { targetUUIDs.contains($0.id) }
+                .map(\.persistentModelID)
+        )
+
+        if restoredIDs.isEmpty {
+            isAllFeedsSelected = true
+            selectedFeedIDs.removeAll()
+        } else {
+            isAllFeedsSelected = false
+            selectedFeedIDs = restoredIDs
+        }
+    }
+
+    private func persistArticleFilterSelection() {
+        lastArticleFilterRaw = articleFilter.rawValue
+    }
+
+    private func restoreArticleFilterSelectionIfPossible() {
+        articleFilter = ArticleFilter(rawValue: lastArticleFilterRaw) ?? .all
+    }
+
+    private func persistArticleSelectionForCurrentFilter(articleID: UUID) {
+        switch articleFilter {
+        case .all:
+            lastSelectedArticleUUIDAllString = articleID.uuidString
+        case .starred:
+            lastSelectedArticleUUIDStarredString = articleID.uuidString
+        }
+    }
+
+    private func selectedArticleUUIDForCurrentFilter() -> String {
+        switch articleFilter {
+        case .all:
+            return !lastSelectedArticleUUIDAllString.isEmpty ? lastSelectedArticleUUIDAllString : lastSelectedArticleUUIDString
+        case .starred:
+            return !lastSelectedArticleUUIDStarredString.isEmpty ? lastSelectedArticleUUIDStarredString : lastSelectedArticleUUIDString
+        }
+    }
+
+    private func restoreArticleSelectionForCurrentFilterIfPossible() {
+        if let currentID = selectedArticleID,
+           displayedArticles.contains(where: { $0.persistentModelID == currentID }) {
+            return
+        }
+
+        selectedArticleID = nil
+        restoreLastSelectedArticleIfPossible()
+    }
+
+    private func handleArticleSelectionAfterFilterChange() {
+        switch articleFilter {
+        case .all:
+            restoreArticleSelectionForCurrentFilterIfPossible()
+        case .starred:
+            // Do not auto-select when entering Starred.
+            if let currentID = selectedArticleID,
+               displayedArticles.contains(where: { $0.persistentModelID == currentID }) {
+                return
+            }
+            selectedArticleID = nil
+        }
+    }
+
+    private func scrollSelectedArticleIntoView(using proxy: ScrollViewProxy) {
+        guard let selectedArticleID else { return }
+        guard displayedArticles.contains(where: { $0.persistentModelID == selectedArticleID }) else { return }
+
+        let targetID = selectedArticleID
+        let delays: [Double] = [0, 0.05, 0.12, 0.24]
+
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard self.selectedArticleID == targetID else { return }
+                guard self.displayedArticles.contains(where: { $0.persistentModelID == targetID }) else { return }
+                proxy.scrollTo(targetID, anchor: .center)
+            }
+        }
     }
 
     @MainActor
@@ -915,6 +1108,7 @@ private struct ArticleDetailView: View {
     @State private var activeBodyLoadID = UUID()
     @State private var contentPathUsesProxy = false
     @State private var contentLoadState: ContentLoadState = .loading
+    @State private var lastSavedScrollProgress: Double = -1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -996,7 +1190,11 @@ private struct ArticleDetailView: View {
                     }
 
                     ZStack(alignment: .topLeading) {
-                        ArticleHTMLView(htmlBody: bodyHTML)
+                        ArticleHTMLView(
+                            htmlBody: bodyHTML,
+                            initialScrollProgress: article.readingScrollProgress,
+                            onScrollProgressChange: persistReadingProgress
+                        )
                         .opacity(showSkeleton ? 0.06 : 1.0)
                         .animation(.easeInOut(duration: 0.18), value: showSkeleton)
 
@@ -1041,6 +1239,7 @@ private struct ArticleDetailView: View {
             isBodyLoading = true
             showSkeleton = true
         }
+        lastSavedScrollProgress = article.readingScrollProgress
 
         guard let url = URL(string: articleLink), url.scheme?.hasPrefix("http") == true else {
             withAnimation(.easeInOut(duration: 0.12)) {
@@ -1066,6 +1265,13 @@ private struct ArticleDetailView: View {
                 }
             }
         }
+    }
+
+    private func persistReadingProgress(_ progress: Double) {
+        let clamped = min(max(progress, 0), 1)
+        guard abs(clamped - lastSavedScrollProgress) >= 0.01 else { return }
+        lastSavedScrollProgress = clamped
+        article.readingScrollProgress = clamped
     }
 
     @ViewBuilder
@@ -1129,10 +1335,17 @@ private struct ArticleContentSkeleton: View {
 
 private struct ArticleHTMLView: View {
     let htmlBody: String
+    var initialScrollProgress: Double = 0
+    var onScrollProgressChange: (Double) -> Void = { _ in }
     var onLoadingStateChange: (Bool) -> Void = { _ in }
 
     var body: some View {
-        HTMLWebView(html: htmlDocument, onLoadingStateChange: onLoadingStateChange)
+        HTMLWebView(
+            html: htmlDocument,
+            initialScrollProgress: initialScrollProgress,
+            onScrollProgressChange: onScrollProgressChange,
+            onLoadingStateChange: onLoadingStateChange
+        )
             .background(Color.clear)
     }
 
@@ -1181,36 +1394,99 @@ private struct ArticleHTMLView: View {
 private struct HTMLWebView: NSViewRepresentable {
     let html: String
     var baseURL: URL? = nil
+    var initialScrollProgress: Double = 0
+    var onScrollProgressChange: (Double) -> Void = { _ in }
     var onLoadingStateChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onLoadingStateChange: onLoadingStateChange)
+        Coordinator(
+            initialScrollProgress: initialScrollProgress,
+            onScrollProgressChange: onScrollProgressChange,
+            onLoadingStateChange: onLoadingStateChange
+        )
     }
 
     func makeNSView(context: Context) -> WKWebView {
-        let view = WKWebView(frame: .zero)
+        let config = WKWebViewConfiguration()
+        config.userContentController = context.coordinator.makeUserContentController()
+        let view = WKWebView(frame: .zero, configuration: config)
         view.setValue(false, forKey: "drawsBackground")
         view.navigationDelegate = context.coordinator
         return view
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.initialScrollProgress = initialScrollProgress
         if context.coordinator.lastHTML != html {
             context.coordinator.lastHTML = html
+            context.coordinator.shouldRestoreOnNextFinish = true
             onLoadingStateChange(true)
             webView.loadHTMLString(html, baseURL: baseURL)
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.navigationDelegate = nil
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: Coordinator.scrollMessageHandlerName)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        static let scrollMessageHandlerName = "rzzScrollProgress"
         var lastHTML: String = ""
+        var shouldRestoreOnNextFinish = false
+        var initialScrollProgress: Double
+        let onScrollProgressChange: (Double) -> Void
         let onLoadingStateChange: (Bool) -> Void
 
-        init(onLoadingStateChange: @escaping (Bool) -> Void) {
+        init(
+            initialScrollProgress: Double,
+            onScrollProgressChange: @escaping (Double) -> Void,
+            onLoadingStateChange: @escaping (Bool) -> Void
+        ) {
+            self.initialScrollProgress = initialScrollProgress
+            self.onScrollProgressChange = onScrollProgressChange
             self.onLoadingStateChange = onLoadingStateChange
         }
 
+        func makeUserContentController() -> WKUserContentController {
+            let controller = WKUserContentController()
+            controller.add(self, name: Self.scrollMessageHandlerName)
+
+            let source = """
+            (function() {
+              function computeProgress() {
+                var doc = document.documentElement;
+                var body = document.body;
+                var fullHeight = Math.max(doc.scrollHeight, body ? body.scrollHeight : 0);
+                var viewport = window.innerHeight || doc.clientHeight || 0;
+                var maxScroll = Math.max(fullHeight - viewport, 0);
+                var y = window.scrollY || doc.scrollTop || 0;
+                var progress = maxScroll > 0 ? (y / maxScroll) : 0;
+                return Math.max(0, Math.min(1, progress));
+              }
+              function publish() {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(Self.scrollMessageHandlerName)) {
+                  window.webkit.messageHandlers.\(Self.scrollMessageHandlerName).postMessage(computeProgress());
+                }
+              }
+              window.addEventListener('scroll', publish, { passive: true });
+              window.addEventListener('resize', publish);
+              document.addEventListener('readystatechange', publish);
+              setTimeout(publish, 0);
+            })();
+            """
+            let script = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+            controller.addUserScript(script)
+            return controller
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            if shouldRestoreOnNextFinish {
+                shouldRestoreOnNextFinish = false
+                let clamped = min(max(initialScrollProgress, 0), 1)
+                let js = "window.scrollTo(0, (document.documentElement.scrollHeight - window.innerHeight) * \(clamped));"
+                webView.evaluateJavaScript(js, completionHandler: nil)
+            }
             onLoadingStateChange(false)
         }
 
@@ -1220,6 +1496,12 @@ private struct HTMLWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             onLoadingStateChange(false)
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == Self.scrollMessageHandlerName else { return }
+            guard let value = message.body as? Double else { return }
+            onScrollProgressChange(value)
         }
     }
 }
@@ -1227,35 +1509,98 @@ private struct HTMLWebView: NSViewRepresentable {
 private struct HTMLWebView: UIViewRepresentable {
     let html: String
     var baseURL: URL? = nil
+    var initialScrollProgress: Double = 0
+    var onScrollProgressChange: (Double) -> Void = { _ in }
     var onLoadingStateChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onLoadingStateChange: onLoadingStateChange)
+        Coordinator(
+            initialScrollProgress: initialScrollProgress,
+            onScrollProgressChange: onScrollProgressChange,
+            onLoadingStateChange: onLoadingStateChange
+        )
     }
 
     func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView(frame: .zero)
+        let config = WKWebViewConfiguration()
+        config.userContentController = context.coordinator.makeUserContentController()
+        let view = WKWebView(frame: .zero, configuration: config)
         view.navigationDelegate = context.coordinator
         return view
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.initialScrollProgress = initialScrollProgress
         if context.coordinator.lastHTML != html {
             context.coordinator.lastHTML = html
+            context.coordinator.shouldRestoreOnNextFinish = true
             onLoadingStateChange(true)
             webView.loadHTMLString(html, baseURL: baseURL)
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.navigationDelegate = nil
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: Coordinator.scrollMessageHandlerName)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        static let scrollMessageHandlerName = "rzzScrollProgress"
         var lastHTML: String = ""
+        var shouldRestoreOnNextFinish = false
+        var initialScrollProgress: Double
+        let onScrollProgressChange: (Double) -> Void
         let onLoadingStateChange: (Bool) -> Void
 
-        init(onLoadingStateChange: @escaping (Bool) -> Void) {
+        init(
+            initialScrollProgress: Double,
+            onScrollProgressChange: @escaping (Double) -> Void,
+            onLoadingStateChange: @escaping (Bool) -> Void
+        ) {
+            self.initialScrollProgress = initialScrollProgress
+            self.onScrollProgressChange = onScrollProgressChange
             self.onLoadingStateChange = onLoadingStateChange
         }
 
+        func makeUserContentController() -> WKUserContentController {
+            let controller = WKUserContentController()
+            controller.add(self, name: Self.scrollMessageHandlerName)
+
+            let source = """
+            (function() {
+              function computeProgress() {
+                var doc = document.documentElement;
+                var body = document.body;
+                var fullHeight = Math.max(doc.scrollHeight, body ? body.scrollHeight : 0);
+                var viewport = window.innerHeight || doc.clientHeight || 0;
+                var maxScroll = Math.max(fullHeight - viewport, 0);
+                var y = window.scrollY || doc.scrollTop || 0;
+                var progress = maxScroll > 0 ? (y / maxScroll) : 0;
+                return Math.max(0, Math.min(1, progress));
+              }
+              function publish() {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(Self.scrollMessageHandlerName)) {
+                  window.webkit.messageHandlers.\(Self.scrollMessageHandlerName).postMessage(computeProgress());
+                }
+              }
+              window.addEventListener('scroll', publish, { passive: true });
+              window.addEventListener('resize', publish);
+              document.addEventListener('readystatechange', publish);
+              setTimeout(publish, 0);
+            })();
+            """
+            let script = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+            controller.addUserScript(script)
+            return controller
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            if shouldRestoreOnNextFinish {
+                shouldRestoreOnNextFinish = false
+                let clamped = min(max(initialScrollProgress, 0), 1)
+                let js = "window.scrollTo(0, (document.documentElement.scrollHeight - window.innerHeight) * \(clamped));"
+                webView.evaluateJavaScript(js, completionHandler: nil)
+            }
             onLoadingStateChange(false)
         }
 
@@ -1265,6 +1610,12 @@ private struct HTMLWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             onLoadingStateChange(false)
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == Self.scrollMessageHandlerName else { return }
+            guard let value = message.body as? Double else { return }
+            onScrollProgressChange(value)
         }
     }
 }

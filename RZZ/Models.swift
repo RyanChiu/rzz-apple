@@ -98,6 +98,7 @@ final class Article {
     var createdAt: Date = Date()
     var isRead: Bool = false
     var isStarred: Bool = false
+    var readingScrollProgress: Double = 0
 
     var feed: Feed?
 
