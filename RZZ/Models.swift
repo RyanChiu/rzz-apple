@@ -37,15 +37,17 @@ final class Feed {
     var proxyPort: Int? = nil
     var proxyUsername: String = ""
     var proxyPassword: String = ""
+    var folderName: String = "New Added"
     var createdAt: Date = Date()
     var lastFetchedAt: Date?
 
     @Relationship(deleteRule: .cascade, inverse: \Article.feed)
     var articles: [Article]
 
-    init(title: String, urlString: String) {
+    init(title: String, urlString: String, folderName: String = "New Added") {
         self.title = title
         self.urlString = urlString
+        self.folderName = folderName
         self.lastFetchedAt = nil
         self.articles = []
     }

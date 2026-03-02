@@ -26,6 +26,7 @@ private struct FeedEditDraft: Identifiable {
     let proxyPort: Int?
     let proxyUsername: String
     let proxyPassword: String
+    let folderName: String
 }
 
 private struct FeedFormValues {
@@ -38,6 +39,7 @@ private struct FeedFormValues {
     let proxyPort: Int?
     let proxyUsername: String
     let proxyPassword: String
+    let folderName: String
 }
 
 private struct FeedDeletionRequest: Identifiable {
@@ -45,6 +47,18 @@ private struct FeedDeletionRequest: Identifiable {
     let feedIDs: [PersistentIdentifier]
     let message: String
     let actionTitle: String
+}
+
+private struct FeedFolderGroup: Identifiable {
+    let id: String
+    let name: String
+    let feeds: [Feed]
+}
+
+private struct FolderRenameDraft: Identifiable {
+    let id = UUID()
+    let originalName: String
+    let currentName: String
 }
 
 struct ContentView: View {
@@ -60,10 +74,10 @@ struct ContentView: View {
     @AppStorage("last_selected_article_uuid") private var lastSelectedArticleUUIDString = ""
     @AppStorage("last_selected_article_uuid_all") private var lastSelectedArticleUUIDAllString = ""
     @AppStorage("last_selected_article_uuid_starred") private var lastSelectedArticleUUIDStarredString = ""
+    @AppStorage("custom_feed_folder_names_json") private var customFeedFolderNamesJSON = "[]"
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
-    @State private var isFeedsExpanded = true
     @State private var articleFilter: ArticleFilter = .all
     @State private var selectedArticleID: PersistentIdentifier?
     @State private var showAddFeed = false
@@ -73,6 +87,11 @@ struct ContentView: View {
     @State private var pendingDeletionRequest: FeedDeletionRequest?
     @State private var showSecuritySettings = false
     @State private var didRestorePersistedUIState = false
+    @State private var showCreateFolderSheet = false
+    @State private var folderRenameDraft: FolderRenameDraft?
+    @State private var collapsedFolderNames: Set<String> = []
+
+    private let defaultFeedFolderName = "New Added"
 
     private var displayedArticles: [Article] {
         groupedDisplayedArticles.flatMap(\.articles)
@@ -85,6 +104,38 @@ struct ContentView: View {
 
     private var selectedFeeds: [Feed] {
         feeds.filter { selectedFeedIDs.contains($0.persistentModelID) }
+    }
+
+    private var customFolderNames: [String] {
+        guard let data = customFeedFolderNamesJSON.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return decoded
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private var allFolderNames: [String] {
+        let feedFolders = feeds.map { normalizedFolderName($0.folderName) }
+        let customFolders = customFolderNames.map(normalizedFolderName(_:))
+        let names = Set(feedFolders + customFolders + [defaultFeedFolderName])
+        return names.sorted { lhs, rhs in
+            if lhs == defaultFeedFolderName { return true }
+            if rhs == defaultFeedFolderName { return false }
+            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+    }
+
+    private var folderGroups: [FeedFolderGroup] {
+        let allFeedsByFolder = Dictionary(grouping: feeds) { normalizedFolderName($0.folderName) }
+        return allFolderNames.map { folderName in
+            FeedFolderGroup(
+                id: folderName,
+                name: folderName,
+                feeds: allFeedsByFolder[folderName] ?? []
+            )
+        }
     }
 
     private var orderedActiveFeeds: [Feed] {
@@ -230,6 +281,26 @@ struct ContentView: View {
 
     private var bodyWithSheets: some View {
         bodyWithSelectionObservers
+            .sheet(isPresented: $showCreateFolderSheet) {
+                FolderFormView { folderName in
+                    addCustomFolder(named: folderName)
+                }
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
+            .sheet(item: $folderRenameDraft) { draft in
+                FolderFormView(
+                    modeTitle: "Rename Folder",
+                    saveButtonTitle: "Save",
+                    initialFolderName: draft.currentName
+                ) { newName in
+                    renameFolder(from: draft.originalName, to: newName)
+                }
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
             .sheet(isPresented: $showAddFeed) {
                 FeedFormView(
                     modeTitle: "Add Feed",
@@ -242,7 +313,9 @@ struct ContentView: View {
                     initialProxyHost: "",
                     initialProxyPort: nil,
                     initialProxyUsername: "",
-                    initialProxyPassword: ""
+                    initialProxyPassword: "",
+                    initialFolderName: defaultFeedFolderName,
+                    availableFolderNames: allFolderNames
                 ) { values in
                     Task {
                         await addFeed(values: values)
@@ -264,7 +337,9 @@ struct ContentView: View {
                     initialProxyHost: draft.proxyHost,
                     initialProxyPort: draft.proxyPort,
                     initialProxyUsername: draft.proxyUsername,
-                    initialProxyPassword: draft.proxyPassword
+                    initialProxyPassword: draft.proxyPassword,
+                    initialFolderName: draft.folderName,
+                    availableFolderNames: allFolderNames
                 ) { values in
                     Task {
                         await updateFeed(feedID: draft.feedID, values: values)
@@ -377,39 +452,85 @@ struct ContentView: View {
         VStack(spacing: 0) {
             List {
                 Section("Feeds") {
-                    DisclosureGroup(isExpanded: $isFeedsExpanded) {
-                        ForEach(feeds) { feed in
-                            FeedScopeRow(
-                                title: feed.title.isEmpty ? feed.urlString : feed.title,
-                                subtitle: feed.urlString,
-                                isSelected: selectedFeedIDs.contains(feed.persistentModelID) && !isAllFeedsSelected,
-                                systemImage: "dot.radiowaves.left.and.right",
-                                sourceProxyEnabled: feed.useProxy,
-                                contentProxyEnabled: feed.useProxyForContent,
-                                onTap: { toggleFeedSelection(feed) }
-                            )
-                            .contextMenu {
-                                Button("Edit") {
-                                    beginEdit(feed: feed)
-                                }
-                                Button("Refresh") {
-                                    Task { await refreshSingleFeed(feed) }
-                                }
-                                Button("Delete", role: .destructive) {
-                                    requestDeleteFeed(feed)
+                    Button {
+                        showCreateFolderSheet = true
+                    } label: {
+                        Label("New Folder", systemImage: "folder.badge.plus")
+                    }
+
+                    FeedScopeRow(
+                        title: "All",
+                        subtitle: "All feeds",
+                        isSelected: isAllFeedsSelected || selectedFeedIDs.isEmpty,
+                        systemImage: "tray.full",
+                        sourceProxyEnabled: false,
+                        contentProxyEnabled: false,
+                        onTap: selectAllFeeds
+                    )
+
+                    ForEach(folderGroups) { group in
+                        DisclosureGroup(
+                            isExpanded: bindingForFolderExpansion(named: group.name)
+                        ) {
+                            if group.feeds.isEmpty {
+                                Text("No feeds")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(group.feeds) { feed in
+                                    FeedScopeRow(
+                                        title: feed.title.isEmpty ? feed.urlString : feed.title,
+                                        subtitle: feed.urlString,
+                                        isSelected: selectedFeedIDs.contains(feed.persistentModelID) && !isAllFeedsSelected,
+                                        systemImage: "dot.radiowaves.left.and.right",
+                                        sourceProxyEnabled: feed.useProxy,
+                                        contentProxyEnabled: feed.useProxyForContent,
+                                        onTap: { toggleFeedSelection(feed) }
+                                    )
+                                    .contextMenu {
+                                        Button("Edit") {
+                                            beginEdit(feed: feed)
+                                        }
+                                        Button("Refresh") {
+                                            Task { await refreshSingleFeed(feed) }
+                                        }
+                                        Button("Delete", role: .destructive) {
+                                            requestDeleteFeed(feed)
+                                        }
+                                    }
                                 }
                             }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "folder")
+                                    .foregroundStyle(.secondary)
+                                Text(group.name)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                Text("\(group.feeds.count)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                            .contextMenu {
+                                Button("New Folder") {
+                                    showCreateFolderSheet = true
+                                }
+
+                                Button("Rename Folder") {
+                                    folderRenameDraft = FolderRenameDraft(
+                                        originalName: group.name,
+                                        currentName: group.name
+                                    )
+                                }
+                                .disabled(group.name == defaultFeedFolderName)
+
+                                Button("Delete Folder", role: .destructive) {
+                                    deleteFolder(named: group.name)
+                                }
+                                .disabled(group.name == defaultFeedFolderName)
+                            }
                         }
-                    } label: {
-                        FeedScopeRow(
-                            title: "All",
-                            subtitle: "All feeds",
-                            isSelected: isAllFeedsSelected || selectedFeedIDs.isEmpty,
-                            systemImage: "tray.full",
-                            sourceProxyEnabled: false,
-                            contentProxyEnabled: false,
-                            onTap: selectAllFeeds
-                        )
                     }
                 }
             }
@@ -450,14 +571,32 @@ struct ContentView: View {
                 ScrollViewReader { scrollProxy in
                     List(selection: $selectedArticleID) {
                         if shouldGroupArticleListByFeed {
-                            ForEach(groupedDisplayedArticles, id: \.feed.persistentModelID) { group in
+                            let groups = groupedDisplayedArticles
+                            ForEach(Array(groups.enumerated()), id: \.element.feed.persistentModelID) { index, group in
                                 Section {
                                     ForEach(group.articles) { article in
                                         articleListRow(article)
                                     }
+                                    if index < groups.count - 1 {
+                                        Divider()
+                                            .padding(.vertical, 6)
+                                    }
                                 } header: {
-                                    Text(group.feed.title.isEmpty ? group.feed.urlString : group.feed.title)
-                                        .textCase(nil)
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "dot.radiowaves.left.and.right")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                        Text(group.feed.title.isEmpty ? group.feed.urlString : group.feed.title)
+                                            .font(.caption)
+                                            .fontWeight(.semibold)
+                                            .lineLimit(1)
+                                        Spacer(minLength: 0)
+                                        Text("\(group.articles.count)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.top, 4)
+                                    .textCase(nil)
                                 }
                             }
                         } else {
@@ -749,7 +888,11 @@ struct ContentView: View {
         let trimmedTitle = values.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayTitle = trimmedTitle.isEmpty ? (url.host ?? trimmedURL) : trimmedTitle
 
-        let feed = Feed(title: displayTitle, urlString: trimmedURL)
+        let feed = Feed(
+            title: displayTitle,
+            urlString: trimmedURL,
+            folderName: normalizedFolderName(values.folderName)
+        )
         applyProxyValues(values, to: feed)
         modelContext.insert(feed)
         selectedFeedIDs = [feed.persistentModelID]
@@ -777,13 +920,36 @@ struct ContentView: View {
         }
         guard validateProxyValues(values) else { return }
 
+        let previousFetchSignature = FeedFetchSignature(
+            urlString: feed.urlString,
+            useProxy: feed.useProxy,
+            proxyType: feed.proxyType,
+            proxyHost: feed.proxyHost,
+            proxyPort: feed.proxyPort,
+            proxyUsername: feed.proxyUsername,
+            proxyPassword: feed.proxyPassword
+        )
+
         let trimmedTitle = values.title.trimmingCharacters(in: .whitespacesAndNewlines)
         feed.title = trimmedTitle.isEmpty ? (url.host ?? trimmedURL) : trimmedTitle
         feed.urlString = trimmedURL
+        feed.folderName = normalizedFolderName(values.folderName)
         applyProxyValues(values, to: feed)
 
+        let updatedFetchSignature = FeedFetchSignature(
+            urlString: feed.urlString,
+            useProxy: feed.useProxy,
+            proxyType: feed.proxyType,
+            proxyHost: feed.proxyHost,
+            proxyPort: feed.proxyPort,
+            proxyUsername: feed.proxyUsername,
+            proxyPassword: feed.proxyPassword
+        )
+
         try? modelContext.save()
-        await refreshSingleFeed(feed)
+        if previousFetchSignature != updatedFetchSignature {
+            await refreshSingleFeed(feed)
+        }
     }
 
     @MainActor
@@ -943,7 +1109,8 @@ struct ContentView: View {
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
-            proxyPassword: feed.proxyPassword
+            proxyPassword: feed.proxyPassword,
+            folderName: normalizedFolderName(feed.folderName)
         )
     }
 
@@ -974,6 +1141,75 @@ struct ContentView: View {
         return true
     }
 
+    private func normalizedFolderName(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? defaultFeedFolderName : trimmed
+    }
+
+    private func addCustomFolder(named rawName: String) {
+        let normalized = normalizedFolderName(rawName)
+        saveCustomFolderNames(Set(customFolderNames + [normalized]))
+    }
+
+    private func saveCustomFolderNames(_ names: Set<String>) {
+        let normalizedSet = Set(names.map(normalizedFolderName(_:)))
+        let sorted = normalizedSet.sorted { lhs, rhs in
+            if lhs == defaultFeedFolderName { return true }
+            if rhs == defaultFeedFolderName { return false }
+            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+
+        guard let data = try? JSONEncoder().encode(sorted),
+              let json = String(data: data, encoding: .utf8) else { return }
+
+        customFeedFolderNamesJSON = json
+    }
+
+    private func renameFolder(from oldRawName: String, to newRawName: String) {
+        let oldName = normalizedFolderName(oldRawName)
+        let newName = normalizedFolderName(newRawName)
+        guard oldName != defaultFeedFolderName else { return }
+        guard oldName != newName else { return }
+
+        for feed in feeds where normalizedFolderName(feed.folderName) == oldName {
+            feed.folderName = newName
+        }
+        try? modelContext.save()
+
+        var names = Set(customFolderNames.map(normalizedFolderName(_:)))
+        names.remove(oldName)
+        names.insert(newName)
+        saveCustomFolderNames(names)
+    }
+
+    private func deleteFolder(named rawName: String) {
+        let name = normalizedFolderName(rawName)
+        guard name != defaultFeedFolderName else { return }
+
+        for feed in feeds where normalizedFolderName(feed.folderName) == name {
+            feed.folderName = defaultFeedFolderName
+        }
+        try? modelContext.save()
+
+        var names = Set(customFolderNames.map(normalizedFolderName(_:)))
+        names.remove(name)
+        saveCustomFolderNames(names)
+        collapsedFolderNames.remove(name)
+    }
+
+    private func bindingForFolderExpansion(named name: String) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedFolderNames.contains(name) },
+            set: { isExpanded in
+                if isExpanded {
+                    collapsedFolderNames.remove(name)
+                } else {
+                    collapsedFolderNames.insert(name)
+                }
+            }
+        )
+    }
+
     private func toggleFeedSelection(_ feed: Feed) {
         if isAllFeedsSelected {
             isAllFeedsSelected = false
@@ -998,6 +1234,34 @@ struct ContentView: View {
         isAllFeedsSelected = true
         selectedFeedIDs.removeAll()
         selectedArticleID = nil
+    }
+}
+
+private struct FeedFetchSignature: Equatable {
+    let urlString: String
+    let useProxy: Bool
+    let proxyType: FeedProxyType
+    let proxyHost: String
+    let proxyPort: Int?
+    let proxyUsername: String
+    let proxyPassword: String
+
+    init(
+        urlString: String,
+        useProxy: Bool,
+        proxyType: FeedProxyType,
+        proxyHost: String,
+        proxyPort: Int?,
+        proxyUsername: String,
+        proxyPassword: String
+    ) {
+        self.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.useProxy = useProxy
+        self.proxyType = proxyType
+        self.proxyHost = proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.proxyPort = proxyPort
+        self.proxyUsername = proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.proxyPassword = proxyPassword
     }
 }
 
@@ -1660,6 +1924,7 @@ private struct FeedFormView: View {
     @State private var proxyPortString: String
     @State private var proxyUsername: String
     @State private var proxyPassword: String
+    @State private var selectedFolderName: String
 
     let modeTitle: String
     let saveButtonTitle: String
@@ -1672,6 +1937,8 @@ private struct FeedFormView: View {
     let initialProxyPort: Int?
     let initialProxyUsername: String
     let initialProxyPassword: String
+    let initialFolderName: String
+    let availableFolderNames: [String]
     let onSave: (FeedFormValues) -> Void
 
     init(
@@ -1686,6 +1953,8 @@ private struct FeedFormView: View {
         initialProxyPort: Int?,
         initialProxyUsername: String,
         initialProxyPassword: String,
+        initialFolderName: String,
+        availableFolderNames: [String],
         onSave: @escaping (FeedFormValues) -> Void
     ) {
         self.modeTitle = modeTitle
@@ -1699,6 +1968,8 @@ private struct FeedFormView: View {
         self.initialProxyPort = initialProxyPort
         self.initialProxyUsername = initialProxyUsername
         self.initialProxyPassword = initialProxyPassword
+        self.initialFolderName = initialFolderName
+        self.availableFolderNames = availableFolderNames
         self.onSave = onSave
         _title = State(initialValue: initialTitle)
         _urlString = State(initialValue: initialURLString)
@@ -1709,6 +1980,7 @@ private struct FeedFormView: View {
         _proxyPortString = State(initialValue: initialProxyPort.map(String.init) ?? "")
         _proxyUsername = State(initialValue: initialProxyUsername)
         _proxyPassword = State(initialValue: initialProxyPassword)
+        _selectedFolderName = State(initialValue: initialFolderName)
     }
 
     var body: some View {
@@ -1767,6 +2039,14 @@ private struct FeedFormView: View {
             #endif
                 .autocorrectionDisabled()
 
+            Section("Folder") {
+                Picker("Folder", selection: $selectedFolderName) {
+                    ForEach(availableFolderNames, id: \.self) { folderName in
+                        Text(folderName).tag(folderName)
+                    }
+                }
+            }
+
             Section("Network") {
                 Toggle("Use Proxy for Feed URL Access", isOn: $useProxy)
                 Toggle("Use Proxy for Content Access", isOn: $useProxyForContent)
@@ -1812,10 +2092,85 @@ private struct FeedFormView: View {
                 proxyHost: proxyHost,
                 proxyPort: Int(proxyPortString),
                 proxyUsername: proxyUsername,
-                proxyPassword: proxyPassword
+                proxyPassword: proxyPassword,
+                folderName: selectedFolderName
             )
         )
         dismiss()
+    }
+}
+
+private struct FolderFormView: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var folderName: String
+    let modeTitle: String
+    let saveButtonTitle: String
+    let onSave: (String) -> Void
+
+    init(
+        modeTitle: String = "New Folder",
+        saveButtonTitle: String = "Create",
+        initialFolderName: String = "",
+        onSave: @escaping (String) -> Void
+    ) {
+        self.modeTitle = modeTitle
+        self.saveButtonTitle = saveButtonTitle
+        self.onSave = onSave
+        _folderName = State(initialValue: initialFolderName)
+    }
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text(modeTitle)
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            Form {
+                TextField("Folder Name", text: $folderName)
+            }
+            .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(saveButtonTitle) {
+                    onSave(folderName)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(folderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(12)
+        }
+        .frame(width: 420)
+        #else
+        NavigationStack {
+            Form {
+                TextField("Folder Name", text: $folderName)
+            }
+            .navigationTitle(modeTitle)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saveButtonTitle) {
+                        onSave(folderName)
+                        dismiss()
+                    }
+                    .disabled(folderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        #endif
     }
 }
 
