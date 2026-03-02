@@ -101,6 +101,8 @@ final class Article {
     var isRead: Bool = false
     var isStarred: Bool = false
     var readingScrollProgress: Double = 0
+    @Relationship(inverse: \Tag.articles)
+    var tags: [Tag] = []
 
     var feed: Feed?
 
@@ -118,11 +120,28 @@ final class Article {
         self.link = link
         self.publishedAt = publishedAt
         self.feed = feed
+        self.tags = []
     }
 
     var dedupeKey: String {
         if !guid.isEmpty { return "guid:\(guid)" }
         if !link.isEmpty { return "link:\(link)" }
         return "title:\(title):\(publishedAt?.timeIntervalSince1970 ?? 0)"
+    }
+}
+
+@Model
+final class Tag {
+    var id: UUID = UUID()
+    var name: String = ""
+    var createdAt: Date = Date()
+
+    @Relationship
+    var articles: [Article] = []
+
+    init(name: String) {
+        self.name = name
+        self.createdAt = Date()
+        self.articles = []
     }
 }

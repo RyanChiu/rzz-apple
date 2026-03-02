@@ -14,6 +14,7 @@ struct RZZApp: App {
         let schema = Schema([
             Feed.self,
             Article.self,
+            Tag.self,
         ])
 
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)

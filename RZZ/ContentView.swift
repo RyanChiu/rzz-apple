@@ -66,6 +66,7 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\Feed.createdAt, order: .reverse)]) private var feeds: [Feed]
     @Query(sort: [SortDescriptor(\Article.publishedAt, order: .reverse), SortDescriptor(\Article.createdAt, order: .reverse)]) private var articles: [Article]
+    @Query(sort: [SortDescriptor(\Tag.name, order: .forward), SortDescriptor(\Tag.createdAt, order: .forward)]) private var tags: [Tag]
     @AppStorage("app_lock_enabled") private var appLockEnabled = false
     @AppStorage("app_lock_pin_hash") private var appLockPINHash = ""
     @AppStorage("last_feed_scope_all") private var lastFeedScopeAll = true
@@ -74,11 +75,13 @@ struct ContentView: View {
     @AppStorage("last_selected_article_uuid") private var lastSelectedArticleUUIDString = ""
     @AppStorage("last_selected_article_uuid_all") private var lastSelectedArticleUUIDAllString = ""
     @AppStorage("last_selected_article_uuid_starred") private var lastSelectedArticleUUIDStarredString = ""
+    @AppStorage("last_selected_tag_uuid") private var lastSelectedTagUUIDString = ""
     @AppStorage("custom_feed_folder_names_json") private var customFeedFolderNamesJSON = "[]"
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
     @State private var articleFilter: ArticleFilter = .all
+    @State private var selectedTagFilterUUIDString = ""
     @State private var selectedArticleID: PersistentIdentifier?
     @State private var showAddFeed = false
     @State private var editDraft: FeedEditDraft?
@@ -86,12 +89,19 @@ struct ContentView: View {
     @State private var refreshError: String?
     @State private var pendingDeletionRequest: FeedDeletionRequest?
     @State private var showSecuritySettings = false
+    @State private var showTagManager = false
     @State private var didRestorePersistedUIState = false
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
     @State private var collapsedFolderNames: Set<String> = []
 
     private let defaultFeedFolderName = "New Added"
+    private let maxTagCount = 5
+
+    private var selectedTagFilter: Tag? {
+        guard let uuid = UUID(uuidString: selectedTagFilterUUIDString) else { return nil }
+        return tags.first(where: { $0.id == uuid })
+    }
 
     private var displayedArticles: [Article] {
         groupedDisplayedArticles.flatMap(\.articles)
@@ -150,6 +160,12 @@ struct ContentView: View {
             var items = feed.articles
             if articleFilter == .starred {
                 items = items.filter(\.isStarred)
+            }
+            if let selectedTagFilter {
+                let selectedTagID = selectedTagFilter.persistentModelID
+                items = items.filter { article in
+                    article.tags.contains(where: { $0.persistentModelID == selectedTagID })
+                }
             }
             items.sort { lhs, rhs in
                 (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
@@ -264,11 +280,21 @@ struct ContentView: View {
                     self.selectedArticleID = nil
                 }
             }
+            .onChange(of: tags.map(\.persistentModelID)) { _, newTagIDs in
+                if let selectedTagFilter,
+                   !newTagIDs.contains(selectedTagFilter.persistentModelID) {
+                    selectedTagFilterUUIDString = ""
+                }
+            }
             .onChange(of: isAllFeedsSelected) { _, _ in
                 persistFeedScopeSelection()
             }
             .onChange(of: selectedFeedIDs) { _, _ in
                 persistFeedScopeSelection()
+            }
+            .onChange(of: selectedTagFilterUUIDString) { _, newValue in
+                lastSelectedTagUUIDString = newValue
+                handleArticleSelectionAfterFilterChange()
             }
             .onChange(of: articleFilter) { _, _ in
                 persistArticleFilterSelection()
@@ -276,11 +302,24 @@ struct ContentView: View {
             }
             .onAppear {
                 restorePersistedUIStateIfNeeded()
+                selectedTagFilterUUIDString = lastSelectedTagUUIDString
             }
     }
 
     private var bodyWithSheets: some View {
         bodyWithSelectionObservers
+            .sheet(isPresented: $showTagManager) {
+                TagManagerView(
+                    tags: tags,
+                    maxTagCount: maxTagCount,
+                    onCreate: createTag(named:),
+                    onRename: renameTag(_:to:),
+                    onDelete: deleteTag(_:)
+                )
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
             .sheet(isPresented: $showCreateFolderSheet) {
                 FolderFormView { folderName in
                     addCustomFolder(named: folderName)
@@ -538,19 +577,53 @@ struct ContentView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 4) {
-                Picker("Article Filter", selection: $articleFilter) {
-                    Image(systemName: "doc.text")
-                        .tag(ArticleFilter.all)
-                        .help("Show all articles in the selected feeds")
-                    Image(systemName: "star.fill")
-                        .tag(ArticleFilter.starred)
-                        .help("Show only starred articles in the selected feeds")
+                HStack(spacing: 0) {
+                    Picker("Article Filter", selection: $articleFilter) {
+                        Image(systemName: "doc.text")
+                            .tag(ArticleFilter.all)
+                            .help("Show all articles in the selected feeds")
+                        Image(systemName: "star.fill")
+                            .tag(ArticleFilter.starred)
+                            .help("Show only starred articles in the selected feeds")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(width: 96)
+                    .accessibilityLabel("Article Filter")
+
+                    Menu {
+                        Button("Any Tag") {
+                            selectedTagFilterUUIDString = ""
+                        }
+                        ForEach(tags) { tag in
+                            Button {
+                                selectedTagFilterUUIDString = tag.id.uuidString
+                            } label: {
+                                Label(
+                                    tag.name,
+                                    systemImage: selectedTagFilterUUIDString == tag.id.uuidString
+                                    ? "checkmark.circle.fill"
+                                    : "circle"
+                                )
+                            }
+                        }
+                        Divider()
+                        Button("Manage Tags…") {
+                            showTagManager = true
+                        }
+                    } label: {
+                        Image(systemName: "tag")
+                            .font(.body)
+                            .foregroundStyle(selectedTagFilter == nil ? .secondary : Color.accentColor)
+                            .frame(width: 34, height: 28)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 7))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .controlSize(.small)
+                    .accessibilityLabel("Tag Filter")
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-                .frame(maxWidth: 96)
-                .accessibilityLabel("Article Filter")
+                .frame(maxWidth: .infinity, alignment: .center)
             }
             .padding(.horizontal, 10)
             .padding(.top, 6)
@@ -707,7 +780,12 @@ struct ContentView: View {
     private var articleDetailPane: some View {
         Group {
             if let selectedArticle {
-                ArticleDetailView(article: selectedArticle)
+                ArticleDetailView(
+                    article: selectedArticle,
+                    tags: tags,
+                    onToggleTag: toggleTag(_:for:),
+                    onOpenTagManager: { showTagManager = true }
+                )
             } else {
                 ContentUnavailableView(
                     "No Article Selected",
@@ -720,16 +798,17 @@ struct ContentView: View {
 
     private var navigationTitle: String {
         let filterTitle = articleFilter == .starred ? "Starred" : "Articles"
+        let tagTitle = selectedTagFilter.map { " #\($0.name)" } ?? ""
 
         if isAllFeedsSelected || selectedFeedIDs.isEmpty {
-            return "All · \(filterTitle)"
+            return "All · \(filterTitle)\(tagTitle)"
         }
 
         if selectedFeeds.count == 1, let feed = selectedFeeds.first {
-            return "\(feed.title) · \(filterTitle)"
+            return "\(feed.title) · \(filterTitle)\(tagTitle)"
         }
 
-        return "\(selectedFeeds.count) Feeds · \(filterTitle)"
+        return "\(selectedFeeds.count) Feeds · \(filterTitle)\(tagTitle)"
     }
 
     private var selectedFeedForEditing: Feed? {
@@ -1197,6 +1276,53 @@ struct ContentView: View {
         collapsedFolderNames.remove(name)
     }
 
+    private func normalizedTagName(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func createTag(named rawName: String) {
+        let normalized = normalizedTagName(rawName)
+        guard !normalized.isEmpty else { return }
+        guard tags.count < maxTagCount else { return }
+        guard !tags.contains(where: { $0.name.caseInsensitiveCompare(normalized) == .orderedSame }) else { return }
+
+        let tag = Tag(name: normalized)
+        modelContext.insert(tag)
+        try? modelContext.save()
+    }
+
+    private func renameTag(_ tag: Tag, to rawName: String) {
+        let normalized = normalizedTagName(rawName)
+        guard !normalized.isEmpty else { return }
+
+        if tags.contains(where: {
+            $0.persistentModelID != tag.persistentModelID &&
+            $0.name.caseInsensitiveCompare(normalized) == .orderedSame
+        }) {
+            return
+        }
+
+        tag.name = normalized
+        try? modelContext.save()
+    }
+
+    private func deleteTag(_ tag: Tag) {
+        if selectedTagFilterUUIDString == tag.id.uuidString {
+            selectedTagFilterUUIDString = ""
+        }
+        modelContext.delete(tag)
+        try? modelContext.save()
+    }
+
+    private func toggleTag(_ tag: Tag, for article: Article) {
+        if let index = article.tags.firstIndex(where: { $0.persistentModelID == tag.persistentModelID }) {
+            article.tags.remove(at: index)
+        } else {
+            article.tags.append(tag)
+        }
+        try? modelContext.save()
+    }
+
     private func bindingForFolderExpansion(named name: String) -> Binding<Bool> {
         Binding(
             get: { !collapsedFolderNames.contains(name) },
@@ -1365,6 +1491,9 @@ private struct ArticleDetailView: View {
     }
 
     @Bindable var article: Article
+    let tags: [Tag]
+    let onToggleTag: (Tag, Article) -> Void
+    let onOpenTagManager: () -> Void
     @State private var isBodyLoading = false
     @State private var showSkeleton = true
     @State private var bodyHTML: String = ""
@@ -1393,6 +1522,31 @@ private struct ArticleDetailView: View {
                     Label(article.isStarred ? "Unstar" : "Star", systemImage: article.isStarred ? "star.slash" : "star")
                 }
 
+                Menu {
+                    if tags.isEmpty {
+                        Text("No tags yet")
+                    } else {
+                        ForEach(tags) { tag in
+                            Button {
+                                onToggleTag(tag, article)
+                            } label: {
+                                Label(
+                                    tag.name,
+                                    systemImage: article.tags.contains(where: { $0.persistentModelID == tag.persistentModelID })
+                                    ? "checkmark.circle.fill"
+                                    : "circle"
+                                )
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Manage Tags…") {
+                        onOpenTagManager()
+                    }
+                } label: {
+                    Label("Tags", systemImage: "tag")
+                }
+
                 if let url = URL(string: article.link), !article.link.isEmpty {
                     Link(destination: url) {
                         Label("Open Original", systemImage: "safari")
@@ -1405,6 +1559,20 @@ private struct ArticleDetailView: View {
                 Text(date.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if !article.tags.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(article.tags.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })) { tag in
+                            Text("#\(tag.name)")
+                                .font(.caption2)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.thinMaterial, in: Capsule())
+                        }
+                    }
+                }
             }
 
             HStack(spacing: 8) {
@@ -2100,21 +2268,166 @@ private struct FeedFormView: View {
     }
 }
 
+private struct TagRenameDraft: Identifiable {
+    let id = UUID()
+    let tagID: PersistentIdentifier
+    let currentName: String
+}
+
+private struct TagManagerView: View {
+    @Environment(\.dismiss) private var dismiss
+    let tags: [Tag]
+    let maxTagCount: Int
+    let onCreate: (String) -> Void
+    let onRename: (Tag, String) -> Void
+    let onDelete: (Tag) -> Void
+
+    @State private var newTagName = ""
+    @State private var renameDraft: TagRenameDraft?
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text("Tags")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            VStack(spacing: 10) {
+                Text("Up to \(maxTagCount) tags.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 8) {
+                    TextField("New tag name", text: $newTagName)
+                    Button("Add") {
+                        onCreate(newTagName)
+                        newTagName = ""
+                    }
+                    .disabled(newTagName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || tags.count >= maxTagCount)
+                }
+
+                List {
+                    ForEach(tags) { tag in
+                        HStack {
+                            Text(tag.name)
+                            Spacer(minLength: 8)
+                            Button("Rename") {
+                                renameDraft = TagRenameDraft(tagID: tag.persistentModelID, currentName: tag.name)
+                            }
+                            .buttonStyle(.borderless)
+                            Button("Delete", role: .destructive) {
+                                onDelete(tag)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
+                .frame(minHeight: 220)
+            }
+            .padding(12)
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 460, height: 380)
+        .sheet(item: $renameDraft) { draft in
+            FolderFormView(
+                modeTitle: "Rename Tag",
+                saveButtonTitle: "Save",
+                nameFieldTitle: "Tag Name",
+                initialFolderName: draft.currentName
+            ) { newName in
+                guard let tag = tags.first(where: { $0.persistentModelID == draft.tagID }) else { return }
+                onRename(tag, newName)
+            }
+            #if os(macOS)
+            .presentationSizing(.fitted)
+            #endif
+        }
+        #else
+        NavigationStack {
+            List {
+                Section("Create") {
+                    Text("Up to \(maxTagCount) tags.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        TextField("New tag name", text: $newTagName)
+                        Button("Add") {
+                            onCreate(newTagName)
+                            newTagName = ""
+                        }
+                        .disabled(newTagName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || tags.count >= maxTagCount)
+                    }
+                }
+
+                Section("All Tags") {
+                    ForEach(tags) { tag in
+                        HStack {
+                            Text(tag.name)
+                            Spacer(minLength: 8)
+                            Button("Rename") {
+                                renameDraft = TagRenameDraft(tagID: tag.persistentModelID, currentName: tag.name)
+                            }
+                            Button("Delete", role: .destructive) {
+                                onDelete(tag)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Tags")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(item: $renameDraft) { draft in
+                FolderFormView(
+                    modeTitle: "Rename Tag",
+                    saveButtonTitle: "Save",
+                    nameFieldTitle: "Tag Name",
+                    initialFolderName: draft.currentName
+                ) { newName in
+                    guard let tag = tags.first(where: { $0.persistentModelID == draft.tagID }) else { return }
+                    onRename(tag, newName)
+                }
+            }
+        }
+        #endif
+    }
+}
+
 private struct FolderFormView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var folderName: String
     let modeTitle: String
     let saveButtonTitle: String
+    let nameFieldTitle: String
     let onSave: (String) -> Void
 
     init(
         modeTitle: String = "New Folder",
         saveButtonTitle: String = "Create",
+        nameFieldTitle: String = "Folder Name",
         initialFolderName: String = "",
         onSave: @escaping (String) -> Void
     ) {
         self.modeTitle = modeTitle
         self.saveButtonTitle = saveButtonTitle
+        self.nameFieldTitle = nameFieldTitle
         self.onSave = onSave
         _folderName = State(initialValue: initialFolderName)
     }
@@ -2133,7 +2446,7 @@ private struct FolderFormView: View {
             Divider()
 
             Form {
-                TextField("Folder Name", text: $folderName)
+                TextField(nameFieldTitle, text: $folderName)
             }
             .formStyle(.grouped)
 
@@ -2154,7 +2467,7 @@ private struct FolderFormView: View {
         #else
         NavigationStack {
             Form {
-                TextField("Folder Name", text: $folderName)
+                TextField(nameFieldTitle, text: $folderName)
             }
             .navigationTitle(modeTitle)
             .toolbar {
@@ -2176,5 +2489,5 @@ private struct FolderFormView: View {
 
 #Preview {
     ContentView(isAppLocked: .constant(false))
-        .modelContainer(for: [Feed.self, Article.self], inMemory: true)
+        .modelContainer(for: [Feed.self, Article.self, Tag.self], inMemory: true)
 }

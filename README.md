@@ -1,52 +1,98 @@
 # rzz-apple
 
-RZZ is a lightweight RSS reader for Apple platforms (macOS + iPhone), focused on:
+RZZ is a lightweight RSS reader for Apple platforms (macOS + iPhone), designed for custom feed URLs, structured feed management, and smooth reading.
 
-- adding custom feed URLs
-- managing subscriptions
-- reading and organizing articles quickly
+## Highlights
 
-## Current V1 Features
+- One codebase for macOS and iOS.
+- Add any valid RSS URL and cache articles locally.
+- Feed organization with folders (default `New Added` + custom folders).
+- Per-feed proxy control with two independent switches:
+  - Feed URL access can use direct/proxy.
+  - Article content access can use direct/proxy.
+- Full article reading with rendered HTML (text, images, links, layout).
+- Reading workflow tools: read/unread, star, tag, filters, restore last session.
+- Optional app lock (PIN) when re-entering app.
 
-- Feed management
-  - Add feed by URL
-  - Edit existing feed (name/url/proxy config with prefilled form values)
-  - Delete feed with confirmation dialog
-  - Prevent duplicate feed URLs
-- Per-feed network config
-  - Optional proxy per feed
-  - Proxy types: HTTP(S), SOCKS5
-  - Proxy host/port/username/password settings
-  - Validation for proxy host and port range
-- Refreshing and parsing
-  - Refresh selected feed or all feeds
-  - RSS XML parsing into local article cache
-  - Deduplication using guid/link/title+date key strategy
-  - Feed title auto-updates from parsed channel title
-- Error handling and diagnostics
-  - DNS and host resolution diagnostics
-  - Multiple network-path diagnostics for hard-to-reach feeds
-  - Better user-facing error messages in refresh flow
-- Reading experience
-  - Sidebar with collapsible `Feed -> Articles` tree
-  - Article detail supports rendered HTML (images, links, layout) via WebKit
-  - Read/unread toggle
-  - Star/unstar toggle
-  - Starred filter entry to view only starred articles
-  - “All Articles” and filtered navigation states
-- Data model
-  - SwiftData models: `Feed`, `Article`
-  - Cascade delete from feed to its cached articles
+## Core Features
 
-## Platform Notes
+### Feed and Folder Management
 
-- Designed to run on macOS and iOS from one codebase.
-- iOS deployment target is set to 17.0 for broader device compatibility.
-- macOS sandbox network client entitlement is enabled for outbound feed requests.
+- Add, edit, refresh, and delete feeds.
+- Duplicate feed URL prevention.
+- Delete confirmation for feeds.
+- Folder support:
+  - Default folder: `New Added`.
+  - Create custom folders.
+  - Rename/delete custom folders from folder context menu.
+  - Deleting a folder moves its feeds back to `New Added`.
+
+### Network and Proxy
+
+- Proxy types: `HTTP(S)` and `SOCKS5`.
+- Shared proxy profile per feed (`host`, `port`, optional auth).
+- Independent toggles:
+  - `Use Proxy for Feed URL Access`
+  - `Use Proxy for Content Access`
+- Friendly network error diagnostics (including DNS/host failures).
+
+### Reading Experience
+
+- Three-pane layout:
+  - Feeds/folders scope
+  - Article list
+  - Article detail
+- Article detail uses WebKit HTML rendering for browser-like result.
+- Actions per article:
+  - Mark read/unread
+  - Star/unstar
+  - Open original link in browser
+  - Assign/remove tags
+- Lightweight loading feedback and skeleton transition in detail pane.
+
+### Filtering and Organization
+
+- Feed scope:
+  - `All`
+  - One feed
+  - Multiple feeds
+- Article filter:
+  - `All`
+  - `Starred`
+- Tag filter:
+  - `Any Tag` or one selected tag
+  - Tag icon integrated beside `All/Starred`
+  - `Manage Tags…` inside tag menu
+- Tag management:
+  - Create, rename, delete tags
+  - Max 5 tags
+
+### Session Restore
+
+On relaunch, RZZ restores previous state as much as possible:
+
+- Selected feed scope (`All` / selected feeds)
+- Selected article filter (`All` / `Starred`)
+- Selected article
+- Article reading scroll progress
+
+### Security
+
+- Optional app lock with 4-6 character PIN.
+- Lock triggers when app resigns active and user returns.
+
+## Quick Start
+
+1. Build and run the app.
+2. Click `+` and add your first feed URL.
+3. Optionally choose folder and proxy settings per feed.
+4. Click refresh to fetch latest articles.
+5. Select an article to read rendered content.
+6. Use star/tag/filter to organize reading.
 
 ## Build
 
-From project root:
+From repository root:
 
 ```bash
 xcodebuild -project RZZ.xcodeproj -scheme RZZ -destination 'platform=macOS' build
@@ -55,9 +101,12 @@ xcodebuild -project RZZ.xcodeproj -scheme RZZ -destination 'generic/platform=iOS
 
 ## Project Structure
 
-- `RZZ/ContentView.swift`: main UI, feed/article interactions, filtering, forms
-- `RZZ/Models.swift`: SwiftData models and proxy-related types
-- `RZZ/RSSService.swift`: network fetch + RSS parse + diagnostics
-- `RZZ/WebKitRSSFallback.swift`: WebKit-based fallback path for problematic feed loading cases
-- `RZZApp.swift`: app entry
+- `RZZ/ContentView.swift`: main UI, feed/folder/article interactions, filters, dialogs
+- `RZZ/Models.swift`: SwiftData models (`Feed`, `Article`, `Tag`) and proxy types
+- `RZZ/RSSService.swift`: networking, RSS parsing, diagnostics
+- `RZZ/WebKitRSSFallback.swift`: fallback loading path for problematic feeds
+- `RZZ/RZZApp.swift`: app entry and model container setup
 
+## Current Scope
+
+This repository currently targets a practical V1/V1+ workflow for personal RSS reading and management on Apple devices, with emphasis on reliability, proxy flexibility, and efficient daily reading.
