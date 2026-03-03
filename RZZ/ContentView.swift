@@ -27,6 +27,7 @@ private struct FeedEditDraft: Identifiable {
     let proxyUsername: String
     let proxyPassword: String
     let folderName: String
+    let isTitleManuallySet: Bool
 }
 
 private struct FeedFormValues {
@@ -53,6 +54,11 @@ private struct FeedFolderGroup: Identifiable {
     let id: String
     let name: String
     let feeds: [Feed]
+}
+
+private struct ArticleListFocusRequest: Equatable {
+    let token: UUID = UUID()
+    let articleID: PersistentIdentifier
 }
 
 private struct FolderRenameDraft: Identifiable {
@@ -94,6 +100,7 @@ struct ContentView: View {
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
     @State private var collapsedFolderNames: Set<String> = []
+    @State private var articleListFocusRequest: ArticleListFocusRequest?
 
     private let defaultFeedFolderName = "New Added"
     private let maxTagCount = 5
@@ -368,7 +375,7 @@ struct ContentView: View {
                 FeedFormView(
                     modeTitle: "Edit Feed",
                     saveButtonTitle: "Update",
-                    initialTitle: draft.title,
+                    initialTitle: draft.isTitleManuallySet ? draft.title : "",
                     initialURLString: draft.urlString,
                     initialUseProxy: draft.useProxy,
                     initialUseProxyForContent: draft.useProxyForContent,
@@ -504,7 +511,8 @@ struct ContentView: View {
                         systemImage: "tray.full",
                         sourceProxyEnabled: false,
                         contentProxyEnabled: false,
-                        onTap: selectAllFeeds
+                        onSelectionTap: selectAllFeeds,
+                        onTitleTap: focusFirstVisibleArticle
                     )
 
                     ForEach(folderGroups) { group in
@@ -524,7 +532,8 @@ struct ContentView: View {
                                         systemImage: "dot.radiowaves.left.and.right",
                                         sourceProxyEnabled: feed.useProxy,
                                         contentProxyEnabled: feed.useProxyForContent,
-                                        onTap: { toggleFeedSelection(feed) }
+                                        onSelectionTap: { toggleFeedSelection(feed) },
+                                        onTitleTap: { requestFocusForSelectedFeed(feed) }
                                     )
                                     .contextMenu {
                                         Button("Edit") {
@@ -650,10 +659,6 @@ struct ContentView: View {
                                     ForEach(group.articles) { article in
                                         articleListRow(article)
                                     }
-                                    if index < groups.count - 1 {
-                                        Divider()
-                                            .padding(.vertical, 6)
-                                    }
                                 } header: {
                                     HStack(spacing: 8) {
                                         Image(systemName: "dot.radiowaves.left.and.right")
@@ -670,6 +675,12 @@ struct ContentView: View {
                                     }
                                     .padding(.top, 4)
                                     .textCase(nil)
+                                } footer: {
+                                    if index < groups.count - 1 {
+                                        Divider()
+                                            .padding(.top, 6)
+                                            .allowsHitTesting(false)
+                                    }
                                 }
                             }
                         } else {
@@ -687,6 +698,10 @@ struct ContentView: View {
                     }
                     .onChange(of: displayedArticles.map(\.persistentModelID)) { _, _ in
                         scrollSelectedArticleIntoView(using: scrollProxy)
+                    }
+                    .onChange(of: articleListFocusRequest?.token) { _, _ in
+                        guard let request = articleListFocusRequest else { return }
+                        scrollArticleIntoTop(using: scrollProxy, articleID: request.articleID)
                     }
                     .onChange(of: selectedArticleID) { _, newSelection in
                     if let newSelection,
@@ -950,6 +965,20 @@ struct ContentView: View {
         }
     }
 
+    private func scrollArticleIntoTop(using proxy: ScrollViewProxy, articleID: PersistentIdentifier) {
+        guard displayedArticles.contains(where: { $0.persistentModelID == articleID }) else { return }
+
+        let targetID = articleID
+        let delays: [Double] = [0, 0.05, 0.12, 0.24]
+
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard self.displayedArticles.contains(where: { $0.persistentModelID == targetID }) else { return }
+                proxy.scrollTo(targetID, anchor: .top)
+            }
+        }
+    }
+
     @MainActor
     private func addFeed(values: FeedFormValues) async {
         let trimmedURL = values.urlString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -970,7 +999,8 @@ struct ContentView: View {
         let feed = Feed(
             title: displayTitle,
             urlString: trimmedURL,
-            folderName: normalizedFolderName(values.folderName)
+            folderName: normalizedFolderName(values.folderName),
+            isTitleManuallySet: !trimmedTitle.isEmpty
         )
         applyProxyValues(values, to: feed)
         modelContext.insert(feed)
@@ -1011,6 +1041,7 @@ struct ContentView: View {
 
         let trimmedTitle = values.title.trimmingCharacters(in: .whitespacesAndNewlines)
         feed.title = trimmedTitle.isEmpty ? (url.host ?? trimmedURL) : trimmedTitle
+        feed.isTitleManuallySet = !trimmedTitle.isEmpty
         feed.urlString = trimmedURL
         feed.folderName = normalizedFolderName(values.folderName)
         applyProxyValues(values, to: feed)
@@ -1081,8 +1112,9 @@ struct ContentView: View {
 
         do {
             let parsedFeed = try await RSSService.fetchFeed(from: url, proxy: feed.proxyConfiguration)
-            if !parsedFeed.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                feed.title = parsedFeed.title
+            let fetchedTitle = parsedFeed.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !feed.isTitleManuallySet, !fetchedTitle.isEmpty {
+                feed.title = fetchedTitle
             }
 
             var existingKeys = Set(feed.articles.map(\.dedupeKey))
@@ -1189,7 +1221,8 @@ struct ContentView: View {
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
             proxyPassword: feed.proxyPassword,
-            folderName: normalizedFolderName(feed.folderName)
+            folderName: normalizedFolderName(feed.folderName),
+            isTitleManuallySet: feed.isTitleManuallySet
         )
     }
 
@@ -1336,6 +1369,22 @@ struct ContentView: View {
         )
     }
 
+    private func requestFocusForSelectedFeed(_ feed: Feed) {
+        guard !isAllFeedsSelected else { return }
+        guard selectedFeedIDs.contains(feed.persistentModelID) else { return }
+        guard let firstArticle = groupedDisplayedArticles
+            .first(where: { $0.feed.persistentModelID == feed.persistentModelID })?
+            .articles
+            .first else { return }
+
+        articleListFocusRequest = ArticleListFocusRequest(articleID: firstArticle.persistentModelID)
+    }
+
+    private func focusFirstVisibleArticle() {
+        guard let first = displayedArticles.first else { return }
+        articleListFocusRequest = ArticleListFocusRequest(articleID: first.persistentModelID)
+    }
+
     private func toggleFeedSelection(_ feed: Feed) {
         if isAllFeedsSelected {
             isAllFeedsSelected = false
@@ -1398,12 +1447,17 @@ private struct FeedScopeRow: View {
     let systemImage: String
     let sourceProxyEnabled: Bool
     let contentProxyEnabled: Bool
-    let onTap: () -> Void
+    let onSelectionTap: () -> Void
+    var onTitleTap: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+            Button(action: onSelectionTap) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
             Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 3) {
@@ -1413,6 +1467,10 @@ private struct FeedScopeRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onTitleTap?()
             }
             Spacer(minLength: 0)
             if sourceProxyEnabled {
@@ -1428,8 +1486,6 @@ private struct FeedScopeRow: View {
                     .accessibilityLabel("Content access uses proxy")
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
     }
 }
 
@@ -1472,14 +1528,6 @@ private struct ArticleRow: View {
             }
         }
         .padding(.vertical, 4)
-        .overlay(alignment: .leading) {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.accentColor)
-                    .frame(width: 3)
-                    .padding(.vertical, 2)
-            }
-        }
     }
 }
 
@@ -1491,6 +1539,7 @@ private struct ArticleDetailView: View {
     }
 
     @Bindable var article: Article
+    @Environment(\.openURL) private var openURL
     let tags: [Tag]
     let onToggleTag: (Tag, Article) -> Void
     let onOpenTagManager: () -> Void
@@ -1548,8 +1597,19 @@ private struct ArticleDetailView: View {
                 }
 
                 if let url = URL(string: article.link), !article.link.isEmpty {
-                    Link(destination: url) {
-                        Label("Open Original", systemImage: "safari")
+                    Menu {
+                        Button {
+                            openURL(url)
+                        } label: {
+                            Label("Open in Browser", systemImage: "safari")
+                        }
+                        Button {
+                            copyToClipboard(article.link)
+                        } label: {
+                            Label("Copy Original URL", systemImage: "doc.on.doc")
+                        }
+                    } label: {
+                        Label("Original", systemImage: "safari")
                     }
                 }
             }
@@ -1624,6 +1684,7 @@ private struct ArticleDetailView: View {
                     ZStack(alignment: .topLeading) {
                         ArticleHTMLView(
                             htmlBody: bodyHTML,
+                            sourceURL: URL(string: article.link),
                             initialScrollProgress: article.readingScrollProgress,
                             onScrollProgressChange: persistReadingProgress
                         )
@@ -1706,6 +1767,15 @@ private struct ArticleDetailView: View {
         article.readingScrollProgress = clamped
     }
 
+    private func copyToClipboard(_ text: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #else
+        UIPasteboard.general.string = text
+        #endif
+    }
+
     @ViewBuilder
     private func proxyStatusPill(title: String, usesProxy: Bool) -> some View {
         statusPill(
@@ -1767,6 +1837,7 @@ private struct ArticleContentSkeleton: View {
 
 private struct ArticleHTMLView: View {
     let htmlBody: String
+    var sourceURL: URL? = nil
     var initialScrollProgress: Double = 0
     var onScrollProgressChange: (Double) -> Void = { _ in }
     var onLoadingStateChange: (Bool) -> Void = { _ in }
@@ -1774,6 +1845,7 @@ private struct ArticleHTMLView: View {
     var body: some View {
         HTMLWebView(
             html: htmlDocument,
+            baseURL: sourceURL,
             initialScrollProgress: initialScrollProgress,
             onScrollProgressChange: onScrollProgressChange,
             onLoadingStateChange: onLoadingStateChange
@@ -1782,43 +1854,174 @@ private struct ArticleHTMLView: View {
     }
 
     private var htmlDocument: String {
-        let lowercased = htmlBody.lowercased()
-        if lowercased.contains("<html") || lowercased.contains("<!doctype html") {
-            return htmlBody
-        }
+        applyReaderOverrides(to: htmlBody)
+    }
+
+    private func applyReaderOverrides(to html: String) -> String {
+        let extracted = extractPrimaryContent(from: html)
+        let sanitized = sanitizeContentMarkup(extracted)
 
         return """
         <!doctype html>
         <html>
         <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <style>
-            :root { color-scheme: light dark; }
-            body {
-              font: -apple-system-body;
-              line-height: 1.55;
-              margin: 0;
-              padding: 0;
-              word-break: break-word;
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+        :root { color-scheme: light dark; }
+        html { -webkit-text-size-adjust: 100% !important; }
+        body {
+          margin: 0;
+          padding: 12px;
+          font: -apple-system-body;
+          font-size: 17px;
+          line-height: 1.6;
+          word-break: break-word;
+          overflow-x: hidden;
+        }
+        article.rzz-reader {
+          max-width: 100%;
+          margin: 0 auto;
+        }
+        h1, h2, h3, h4, h5, h6 {
+          line-height: 1.3;
+          margin: 0.9em 0 0.45em;
+        }
+        h1 { font-size: 1.55em; }
+        h2 { font-size: 1.35em; }
+        h3 { font-size: 1.2em; }
+        img, video, iframe, svg, canvas {
+          max-width: 100% !important;
+          height: auto !important;
+          border-radius: 8px;
+        }
+        table, pre, code {
+          max-width: 100% !important;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+        a { text-decoration: none; }
+        </style>
+        <script>
+        (function() {
+          function normalizeURL(value) {
+            if (!value) return "";
+            var trimmed = String(value).trim();
+            if (!trimmed) return "";
+            if (trimmed.startsWith("//")) return "https:" + trimmed;
+            return trimmed;
+          }
+
+          function firstAttr(el, names) {
+            for (var i = 0; i < names.length; i++) {
+              var v = el.getAttribute(names[i]);
+              if (v && String(v).trim()) return v;
             }
-            img, video, iframe {
-              max-width: 100%;
-              height: auto;
-              border-radius: 8px;
-            }
-            pre, code {
-              white-space: pre-wrap;
-              word-break: break-word;
-            }
-            a { text-decoration: none; }
-          </style>
+            return "";
+          }
+
+          function normalizeMedia() {
+            var imgs = document.querySelectorAll("img");
+            imgs.forEach(function(img) {
+              var src = firstAttr(img, ["src", "data-src", "data-original", "data-url", "data-lazy-src", "data-ks-lazyload"]);
+              if ((!img.getAttribute("src") || !String(img.getAttribute("src")).trim()) && src) {
+                img.setAttribute("src", normalizeURL(src));
+              }
+              if (!img.getAttribute("srcset")) {
+                var srcset = firstAttr(img, ["data-srcset", "srcset"]);
+                if (srcset) img.setAttribute("srcset", srcset);
+              }
+            });
+          }
+
+          function normalizeLinks() {
+            var anchors = document.querySelectorAll("a");
+            anchors.forEach(function(a) {
+              var href = firstAttr(a, ["href", "data-href", "data-url", "data-link"]);
+              if ((!a.getAttribute("href") || !String(a.getAttribute("href")).trim()) && href) {
+                a.setAttribute("href", normalizeURL(href));
+              }
+            });
+          }
+
+          function run() {
+            normalizeMedia();
+            normalizeLinks();
+          }
+
+          document.addEventListener("DOMContentLoaded", run);
+          window.addEventListener("load", run);
+          setTimeout(run, 0);
+          setTimeout(run, 120);
+        })();
+        </script>
         </head>
         <body>
-        \(htmlBody)
+        <article class="rzz-reader">
+        \(sanitized)
+        </article>
         </body>
         </html>
         """
+    }
+
+    private func extractPrimaryContent(from html: String) -> String {
+        if let article = firstCapturedGroup(in: html, pattern: "<article\\b[^>]*>([\\s\\S]*?)</article>") {
+            return article
+        }
+        if let main = firstCapturedGroup(in: html, pattern: "<main\\b[^>]*>([\\s\\S]*?)</main>") {
+            return main
+        }
+        if let body = firstCapturedGroup(in: html, pattern: "<body\\b[^>]*>([\\s\\S]*?)</body>") {
+            return body
+        }
+        return html
+    }
+
+    private func firstCapturedGroup(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: nsRange),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        let value = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private func sanitizeContentMarkup(_ input: String) -> String {
+        var output = input
+        let patterns: [String] = [
+            "<script\\b[^>]*>[\\s\\S]*?</script>",
+            "<style\\b[^>]*>[\\s\\S]*?</style>",
+            "<noscript\\b[^>]*>[\\s\\S]*?</noscript>",
+            "<meta\\b[^>]*>",
+            "<link\\b[^>]*>",
+            "<(?:header|nav|aside|footer|form)\\b[^>]*>[\\s\\S]*?</(?:header|nav|aside|footer|form)>"
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = regex.stringByReplacingMatches(in: output, options: [], range: range, withTemplate: "")
+        }
+
+        let attributePatterns: [String] = [
+            "\\sstyle\\s*=\\s*(\"[^\"]*\"|'[^']*')",
+            "\\s(?:width|height)\\s*=\\s*(\"[^\"]*\"|'[^']*'|\\S+)",
+            "\\son\\w+\\s*=\\s*(\"[^\"]*\"|'[^']*')"
+        ]
+
+        for pattern in attributePatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = regex.stringByReplacingMatches(in: output, options: [], range: range, withTemplate: "")
+        }
+
+        return output
     }
 }
 

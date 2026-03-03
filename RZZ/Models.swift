@@ -29,6 +29,7 @@ struct FeedProxyConfiguration {
 final class Feed {
     var id: UUID = UUID()
     var title: String = ""
+    var isTitleManuallySet: Bool = true
     var urlString: String = ""
     var useProxy: Bool = false
     var useProxyForContent: Bool = false
@@ -44,8 +45,14 @@ final class Feed {
     @Relationship(deleteRule: .cascade, inverse: \Article.feed)
     var articles: [Article]
 
-    init(title: String, urlString: String, folderName: String = "New Added") {
+    init(
+        title: String,
+        urlString: String,
+        folderName: String = "New Added",
+        isTitleManuallySet: Bool = true
+    ) {
         self.title = title
+        self.isTitleManuallySet = isTitleManuallySet
         self.urlString = urlString
         self.folderName = folderName
         self.lastFetchedAt = nil
