@@ -121,6 +121,7 @@ struct ContentView: View {
     @State private var articleListFocusRequest: ArticleListFocusRequest?
     @State private var offlineCachingArticleIDs: Set<PersistentIdentifier> = []
     @State private var offlineCacheGeneration: Int = 0
+    @State private var didMigrateLegacyProxySecrets = false
 
     private let defaultFeedFolderName = "New Added"
     private let maxTagCount = 5
@@ -347,6 +348,7 @@ struct ContentView: View {
                 if selectedFeedIDs.isEmpty {
                     isAllFeedsSelected = true
                 }
+                migrateLegacyProxySecretsIfNeeded()
                 restorePersistedUIStateIfNeeded()
             }
             .onChange(of: displayedArticles.map(\.persistentModelID)) { _, visibleArticleIDs in
@@ -375,6 +377,7 @@ struct ContentView: View {
                 handleArticleSelectionAfterFilterChange()
             }
             .onAppear {
+                migrateLegacyProxySecretsIfNeeded()
                 restorePersistedUIStateIfNeeded()
                 selectedTagFilterUUIDString = lastSelectedTagUUIDString
             }
@@ -1102,7 +1105,10 @@ struct ContentView: View {
             folderName: normalizedFolderName(values.folderName),
             isTitleManuallySet: !trimmedTitle.isEmpty
         )
-        applyProxyValues(values, to: feed)
+        guard applyProxyValues(values, to: feed) else {
+            refreshError = "Could not save proxy password securely. Please verify Keychain is available and try again."
+            return
+        }
         feed.offlinePolicy = values.offlinePolicy
         modelContext.insert(feed)
         selectedFeedIDs = [feed.persistentModelID]
@@ -1138,7 +1144,7 @@ struct ContentView: View {
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
-            proxyPassword: feed.proxyPassword
+            proxyPassword: feed.proxyPasswordValue
         )
 
         let trimmedTitle = values.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1146,7 +1152,10 @@ struct ContentView: View {
         feed.isTitleManuallySet = !trimmedTitle.isEmpty
         feed.urlString = trimmedURL
         feed.folderName = normalizedFolderName(values.folderName)
-        applyProxyValues(values, to: feed)
+        guard applyProxyValues(values, to: feed) else {
+            refreshError = "Could not save proxy password securely. Please verify Keychain is available and try again."
+            return
+        }
         feed.offlinePolicy = values.offlinePolicy
 
         let updatedFetchSignature = FeedFetchSignature(
@@ -1156,7 +1165,7 @@ struct ContentView: View {
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
-            proxyPassword: feed.proxyPassword
+            proxyPassword: feed.proxyPasswordValue
         )
 
         try? modelContext.save()
@@ -1289,6 +1298,7 @@ struct ContentView: View {
         if let selectedArticleID, feed.articles.contains(where: { $0.persistentModelID == selectedArticleID }) {
             self.selectedArticleID = nil
         }
+        feed.clearSecureProxyPassword()
         modelContext.delete(feed)
         try? modelContext.save()
     }
@@ -1339,14 +1349,19 @@ struct ContentView: View {
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
-            proxyPassword: feed.proxyPassword,
+            proxyPassword: feed.proxyPasswordValue,
             offlinePolicy: feed.offlinePolicy,
             folderName: normalizedFolderName(feed.folderName),
             isTitleManuallySet: feed.isTitleManuallySet
         )
     }
 
-    private func applyProxyValues(_ values: FeedFormValues, to feed: Feed) {
+    @discardableResult
+    private func applyProxyValues(_ values: FeedFormValues, to feed: Feed) -> Bool {
+        guard feed.setProxyPasswordSecurely(values.proxyPassword) else {
+            return false
+        }
+
         feed.useProxy = values.useProxy
         feed.useProxyForContent = values.useProxyForContent
         feed.allowInsecureHTTPForContent = values.allowInsecureHTTPForContent
@@ -1354,7 +1369,34 @@ struct ContentView: View {
         feed.proxyHost = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
         feed.proxyPort = values.proxyPort
         feed.proxyUsername = values.proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-        feed.proxyPassword = values.proxyPassword
+        return true
+    }
+
+    private func migrateLegacyProxySecretsIfNeeded() {
+        guard !didMigrateLegacyProxySecrets else { return }
+        guard !feeds.isEmpty else { return }
+
+        var migratedAny = false
+        var clearedWithoutMigration = 0
+        for feed in feeds {
+            switch feed.migrateLegacyProxyPasswordIfNeeded() {
+            case .notNeeded:
+                break
+            case .migrated:
+                migratedAny = true
+            case .clearedWithoutMigration:
+                migratedAny = true
+                clearedWithoutMigration += 1
+            }
+        }
+
+        if migratedAny {
+            try? modelContext.save()
+        }
+        if clearedWithoutMigration > 0 {
+            refreshError = "For security, \(clearedWithoutMigration) legacy proxy password(s) could not be migrated to Keychain and were cleared. Please re-enter them."
+        }
+        didMigrateLegacyProxySecrets = true
     }
 
     private func validateProxyValues(_ values: FeedFormValues) -> Bool {

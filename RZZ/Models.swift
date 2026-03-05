@@ -1,6 +1,12 @@
 import Foundation
 import SwiftData
 
+enum ProxyPasswordMigrationResult {
+    case notNeeded
+    case migrated
+    case clearedWithoutMigration
+}
+
 enum FeedOfflinePolicy: String, CaseIterable, Codable, Identifiable {
     case off
     case metadataOnly
@@ -118,7 +124,7 @@ final class Feed {
         guard let port = proxyPort, (1...65535).contains(port) else { return nil }
 
         let username = proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-        let password = proxyPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = proxyPasswordValue
 
         return FeedProxyConfiguration(
             type: proxyType,
@@ -127,6 +133,56 @@ final class Feed {
             username: username.isEmpty ? nil : username,
             password: password.isEmpty ? nil : password
         )
+    }
+
+    var proxyPasswordValue: String {
+        if let secure = SecureSecretStore.readPassword(forAccount: proxyPasswordAccount), !secure.isEmpty {
+            return secure
+        }
+        return proxyPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func migrateLegacyProxyPasswordIfNeeded() -> ProxyPasswordMigrationResult {
+        let legacy = proxyPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !legacy.isEmpty else { return .notNeeded }
+
+        if SecureSecretStore.readPassword(forAccount: proxyPasswordAccount) == nil {
+            guard SecureSecretStore.savePassword(legacy, forAccount: proxyPasswordAccount) else {
+                // Strict mode: do not retain plaintext fallback.
+                proxyPassword = ""
+                return .clearedWithoutMigration
+            }
+        }
+
+        proxyPassword = ""
+        return .migrated
+    }
+
+    @discardableResult
+    func setProxyPasswordSecurely(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.isEmpty {
+            SecureSecretStore.deletePassword(forAccount: proxyPasswordAccount)
+            proxyPassword = ""
+            return true
+        }
+
+        if SecureSecretStore.savePassword(trimmed, forAccount: proxyPasswordAccount) {
+            proxyPassword = ""
+            return true
+        }
+
+        return false
+    }
+
+    func clearSecureProxyPassword() {
+        SecureSecretStore.deletePassword(forAccount: proxyPasswordAccount)
+        proxyPassword = ""
+    }
+
+    private var proxyPasswordAccount: String {
+        "feed-proxy-password.\(id.uuidString.lowercased())"
     }
 }
 
