@@ -21,11 +21,13 @@ private struct FeedEditDraft: Identifiable {
     let urlString: String
     let useProxy: Bool
     let useProxyForContent: Bool
+    let allowInsecureHTTPForContent: Bool
     let proxyType: FeedProxyType
     let proxyHost: String
     let proxyPort: Int?
     let proxyUsername: String
     let proxyPassword: String
+    let offlinePolicy: FeedOfflinePolicy
     let folderName: String
     let isTitleManuallySet: Bool
 }
@@ -35,11 +37,13 @@ private struct FeedFormValues {
     let urlString: String
     let useProxy: Bool
     let useProxyForContent: Bool
+    let allowInsecureHTTPForContent: Bool
     let proxyType: FeedProxyType
     let proxyHost: String
     let proxyPort: Int?
     let proxyUsername: String
     let proxyPassword: String
+    let offlinePolicy: FeedOfflinePolicy
     let folderName: String
 }
 
@@ -65,6 +69,19 @@ private struct FolderRenameDraft: Identifiable {
     let id = UUID()
     let originalName: String
     let currentName: String
+}
+
+private struct OfflineCacheFeedUsage: Identifiable {
+    let id: PersistentIdentifier
+    let feedTitle: String
+    let cachedCount: Int
+    let cachedBytes: Int
+}
+
+private struct OfflineCacheSummary {
+    let totalCachedCount: Int
+    let totalCachedBytes: Int
+    let feedUsages: [OfflineCacheFeedUsage]
 }
 
 struct ContentView: View {
@@ -95,12 +112,15 @@ struct ContentView: View {
     @State private var refreshError: String?
     @State private var pendingDeletionRequest: FeedDeletionRequest?
     @State private var showSecuritySettings = false
+    @State private var showOfflineStorage = false
     @State private var showTagManager = false
     @State private var didRestorePersistedUIState = false
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
     @State private var collapsedFolderNames: Set<String> = []
     @State private var articleListFocusRequest: ArticleListFocusRequest?
+    @State private var offlineCachingArticleIDs: Set<PersistentIdentifier> = []
+    @State private var offlineCacheGeneration: Int = 0
 
     private let defaultFeedFolderName = "New Added"
     private let maxTagCount = 5
@@ -201,6 +221,45 @@ struct ContentView: View {
         return "Selected: \(selectedFeeds.count) feeds"
     }
 
+    private var offlineCacheSummary: OfflineCacheSummary {
+        var totalCount = 0
+        var totalBytes = 0
+        var usages: [OfflineCacheFeedUsage] = []
+
+        for feed in feeds {
+            let cachedArticles = feed.articles.filter(\.hasOfflineContent)
+            guard !cachedArticles.isEmpty else { continue }
+
+            let bytes = cachedArticles.reduce(0) { partialResult, article in
+                partialResult + max(article.offlineCachedBytes, article.offlineCachedHTML.lengthOfBytes(using: .utf8))
+            }
+            let feedTitle = feed.title.isEmpty ? feed.urlString : feed.title
+            usages.append(
+                OfflineCacheFeedUsage(
+                    id: feed.persistentModelID,
+                    feedTitle: feedTitle,
+                    cachedCount: cachedArticles.count,
+                    cachedBytes: bytes
+                )
+            )
+            totalCount += cachedArticles.count
+            totalBytes += bytes
+        }
+
+        usages.sort { lhs, rhs in
+            if lhs.cachedBytes == rhs.cachedBytes {
+                return lhs.feedTitle.localizedCaseInsensitiveCompare(rhs.feedTitle) == .orderedAscending
+            }
+            return lhs.cachedBytes > rhs.cachedBytes
+        }
+
+        return OfflineCacheSummary(
+            totalCachedCount: totalCount,
+            totalCachedBytes: totalBytes,
+            feedUsages: usages
+        )
+    }
+
     private var selectedArticle: Article? {
         guard let selectedArticleID else { return nil }
         guard displayedArticles.contains(where: { $0.persistentModelID == selectedArticleID }) else { return nil }
@@ -255,6 +314,14 @@ struct ContentView: View {
                         }
                         .disabled(shouldShowLockScreen)
                     }
+
+                    Button {
+                        guard !shouldShowLockScreen else { return }
+                        showOfflineStorage = true
+                    } label: {
+                        Label("Offline Storage", systemImage: "internaldrive")
+                    }
+                    .disabled(shouldShowLockScreen)
 
                     Button {
                         guard !shouldShowLockScreen else { return }
@@ -355,11 +422,13 @@ struct ContentView: View {
                     initialURLString: "",
                     initialUseProxy: false,
                     initialUseProxyForContent: false,
+                    initialAllowInsecureHTTPForContent: false,
                     initialProxyType: .http,
                     initialProxyHost: "",
                     initialProxyPort: nil,
                     initialProxyUsername: "",
                     initialProxyPassword: "",
+                    initialOfflinePolicy: .off,
                     initialFolderName: defaultFeedFolderName,
                     availableFolderNames: allFolderNames
                 ) { values in
@@ -379,11 +448,13 @@ struct ContentView: View {
                     initialURLString: draft.urlString,
                     initialUseProxy: draft.useProxy,
                     initialUseProxyForContent: draft.useProxyForContent,
+                    initialAllowInsecureHTTPForContent: draft.allowInsecureHTTPForContent,
                     initialProxyType: draft.proxyType,
                     initialProxyHost: draft.proxyHost,
                     initialProxyPort: draft.proxyPort,
                     initialProxyUsername: draft.proxyUsername,
                     initialProxyPassword: draft.proxyPassword,
+                    initialOfflinePolicy: draft.offlinePolicy,
                     initialFolderName: draft.folderName,
                     availableFolderNames: allFolderNames
                 ) { values in
@@ -399,6 +470,18 @@ struct ContentView: View {
                 AppLockSettingsView(
                     isEnabled: $appLockEnabled,
                     pinHash: $appLockPINHash
+                )
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
+            .sheet(isPresented: $showOfflineStorage) {
+                OfflineStorageView(
+                    totalCachedCount: offlineCacheSummary.totalCachedCount,
+                    totalCachedBytes: offlineCacheSummary.totalCachedBytes,
+                    feedUsages: offlineCacheSummary.feedUsages,
+                    onClearAll: clearAllOfflineCache,
+                    onClearFeed: clearOfflineCache(forUsage:)
                 )
                 #if os(macOS)
                 .presentationSizing(.fitted)
@@ -511,6 +594,8 @@ struct ContentView: View {
                         systemImage: "tray.full",
                         sourceProxyEnabled: false,
                         contentProxyEnabled: false,
+                        offlinePolicy: .off,
+                        allowsInsecureHTTPContent: false,
                         onSelectionTap: selectAllFeeds,
                         onTitleTap: focusFirstVisibleArticle
                     )
@@ -532,6 +617,8 @@ struct ContentView: View {
                                         systemImage: "dot.radiowaves.left.and.right",
                                         sourceProxyEnabled: feed.useProxy,
                                         contentProxyEnabled: feed.useProxyForContent,
+                                        offlinePolicy: feed.offlinePolicy,
+                                        allowsInsecureHTTPContent: feed.allowInsecureHTTPForContent,
                                         onSelectionTap: { toggleFeedSelection(feed) },
                                         onTitleTap: { requestFocusForSelectedFeed(feed) }
                                     )
@@ -739,6 +826,16 @@ struct ContentView: View {
                 Button(article.isStarred ? "Unstar" : "Star") {
                     article.isStarred.toggle()
                 }
+                if article.feed?.offlinePolicy == .fullContent {
+                    Divider()
+                    Button("Retry Offline Cache") {
+                        retryOfflineCaching(for: article)
+                    }
+                    .disabled(
+                        article.offlineStatus == .caching ||
+                        offlineCachingArticleIDs.contains(article.persistentModelID)
+                    )
+                }
             }
             .listRowBackground(
                 (selectedArticleID == article.persistentModelID)
@@ -799,7 +896,10 @@ struct ContentView: View {
                     article: selectedArticle,
                     tags: tags,
                     onToggleTag: toggleTag(_:for:),
-                    onOpenTagManager: { showTagManager = true }
+                    onOpenTagManager: { showTagManager = true },
+                    onRetryOfflineCaching: {
+                        retryOfflineCaching(for: selectedArticle)
+                    }
                 )
             } else {
                 ContentUnavailableView(
@@ -1003,6 +1103,7 @@ struct ContentView: View {
             isTitleManuallySet: !trimmedTitle.isEmpty
         )
         applyProxyValues(values, to: feed)
+        feed.offlinePolicy = values.offlinePolicy
         modelContext.insert(feed)
         selectedFeedIDs = [feed.persistentModelID]
         isAllFeedsSelected = false
@@ -1028,6 +1129,7 @@ struct ContentView: View {
             return
         }
         guard validateProxyValues(values) else { return }
+        let previousOfflinePolicy = feed.offlinePolicy
 
         let previousFetchSignature = FeedFetchSignature(
             urlString: feed.urlString,
@@ -1045,6 +1147,7 @@ struct ContentView: View {
         feed.urlString = trimmedURL
         feed.folderName = normalizedFolderName(values.folderName)
         applyProxyValues(values, to: feed)
+        feed.offlinePolicy = values.offlinePolicy
 
         let updatedFetchSignature = FeedFetchSignature(
             urlString: feed.urlString,
@@ -1059,6 +1162,8 @@ struct ContentView: View {
         try? modelContext.save()
         if previousFetchSignature != updatedFetchSignature {
             await refreshSingleFeed(feed)
+        } else if previousOfflinePolicy != feed.offlinePolicy && feed.offlinePolicy == .fullContent {
+            enqueueOfflineCaching(for: feed.articles, feed: feed)
         }
     }
 
@@ -1154,6 +1259,19 @@ struct ContentView: View {
 
             feed.lastFetchedAt = Date()
             try? modelContext.save()
+            enqueueOfflineCaching(for: newArticles, feed: feed)
+
+            if feed.offlinePolicy == .fullContent {
+                let retryCandidates = feed.articles
+                    .sorted { lhs, rhs in
+                        (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
+                    }
+                    .filter { article in
+                        !article.hasOfflineContent && article.offlineStatus != .caching
+                    }
+                let retryBatch = Array(retryCandidates.prefix(24))
+                enqueueOfflineCaching(for: retryBatch, feed: feed)
+            }
         } catch {
             if let urlError = error as? URLError, urlError.code == .cannotFindHost {
                 refreshError = "DNS could not resolve host '\(url.host ?? "unknown")' (\(urlError.code.rawValue)). Try enabling proxy for this feed or check your network DNS settings."
@@ -1216,11 +1334,13 @@ struct ContentView: View {
             urlString: feed.urlString,
             useProxy: feed.useProxy,
             useProxyForContent: feed.useProxyForContent,
+            allowInsecureHTTPForContent: feed.allowInsecureHTTPForContent,
             proxyType: feed.proxyType,
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
             proxyPassword: feed.proxyPassword,
+            offlinePolicy: feed.offlinePolicy,
             folderName: normalizedFolderName(feed.folderName),
             isTitleManuallySet: feed.isTitleManuallySet
         )
@@ -1229,6 +1349,7 @@ struct ContentView: View {
     private func applyProxyValues(_ values: FeedFormValues, to feed: Feed) {
         feed.useProxy = values.useProxy
         feed.useProxyForContent = values.useProxyForContent
+        feed.allowInsecureHTTPForContent = values.allowInsecureHTTPForContent
         feed.proxyType = values.proxyType
         feed.proxyHost = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
         feed.proxyPort = values.proxyPort
@@ -1251,6 +1372,167 @@ struct ContentView: View {
         _ = port
 
         return true
+    }
+
+    @MainActor
+    private func retryOfflineCaching(for article: Article) {
+        guard let feed = article.feed else { return }
+        guard feed.offlinePolicy == .fullContent else { return }
+        enqueueOfflineCaching(for: article, feed: feed, force: true)
+    }
+
+    @MainActor
+    private func enqueueOfflineCaching(for candidates: [Article], feed: Feed, force: Bool = false) {
+        guard feed.offlinePolicy == .fullContent else { return }
+        for article in candidates {
+            enqueueOfflineCaching(for: article, feed: feed, force: force)
+        }
+    }
+
+    @MainActor
+    private func enqueueOfflineCaching(for article: Article, feed: Feed, force: Bool = false) {
+        guard feed.offlinePolicy == .fullContent else { return }
+        if !force, article.hasOfflineContent { return }
+        guard !offlineCachingArticleIDs.contains(article.persistentModelID) else { return }
+
+        if !force, cacheOfflineFromFeedContentIfAvailable(for: article) {
+            try? modelContext.save()
+            return
+        }
+
+        let articleLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: articleLink), url.scheme?.hasPrefix("http") == true else {
+            article.offlineStatus = .failed
+            article.offlineLastError = "Invalid article URL."
+            try? modelContext.save()
+            return
+        }
+
+        let articleID = article.persistentModelID
+        let generation = offlineCacheGeneration
+        let selectedProxy: FeedProxyConfiguration? = feed.useProxyForContent ? feed.contentProxyConfiguration : nil
+        let allowInsecureHTTPContent = feed.allowInsecureHTTPForContent
+
+        offlineCachingArticleIDs.insert(articleID)
+        article.offlineStatus = .caching
+        article.offlineLastError = ""
+        try? modelContext.save()
+
+        Task(priority: .utility) {
+            let result: Result<String, Error>
+            do {
+                let html = try await RSSService.fetchArticleHTML(
+                    from: url,
+                    proxy: selectedProxy,
+                    allowInsecureHTTPInWebContent: allowInsecureHTTPContent
+                )
+                result = .success(html)
+            } catch {
+                result = .failure(error)
+            }
+
+            await MainActor.run {
+                applyOfflineCachingResult(
+                    articleID: articleID,
+                    generation: generation,
+                    result: result
+                )
+            }
+        }
+    }
+
+    @MainActor
+    private func applyOfflineCachingResult(
+        articleID: PersistentIdentifier,
+        generation: Int,
+        result: Result<String, Error>
+    ) {
+        offlineCachingArticleIDs.remove(articleID)
+        guard generation == offlineCacheGeneration else { return }
+        guard let article = articles.first(where: { $0.persistentModelID == articleID }) else { return }
+
+        switch result {
+        case .success(let html):
+            let normalized = html.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else {
+                article.offlineStatus = article.hasOfflineContent ? .cached : .failed
+                article.offlineLastError = "Fetched HTML is empty."
+                try? modelContext.save()
+                return
+            }
+            article.offlineCachedHTML = html
+            article.offlineCachedBytes = html.lengthOfBytes(using: .utf8)
+            article.offlineCachedAt = Date()
+            article.offlineLastError = ""
+            article.offlineStatus = .cached
+        case .failure(let error):
+            if article.hasOfflineContent {
+                article.offlineStatus = .cached
+                article.offlineLastError = ""
+            } else {
+                article.offlineStatus = .failed
+                article.offlineLastError = describeOfflineError(error)
+            }
+        }
+
+        try? modelContext.save()
+    }
+
+    @MainActor
+    private func cacheOfflineFromFeedContentIfAvailable(for article: Article) -> Bool {
+        let summary = article.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return false }
+
+        article.offlineCachedHTML = article.summary
+        article.offlineCachedBytes = article.summary.lengthOfBytes(using: .utf8)
+        article.offlineCachedAt = Date()
+        article.offlineStatus = .cached
+        article.offlineLastError = ""
+        return true
+    }
+
+    @MainActor
+    private func clearAllOfflineCache() {
+        offlineCacheGeneration += 1
+        offlineCachingArticleIDs.removeAll()
+        for article in articles {
+            clearOfflineCacheFields(for: article)
+        }
+        try? modelContext.save()
+    }
+
+    @MainActor
+    private func clearOfflineCache(forUsage usage: OfflineCacheFeedUsage) {
+        guard let feed = feeds.first(where: { $0.persistentModelID == usage.id }) else { return }
+
+        offlineCacheGeneration += 1
+        for article in feed.articles {
+            offlineCachingArticleIDs.remove(article.persistentModelID)
+            clearOfflineCacheFields(for: article)
+        }
+        try? modelContext.save()
+    }
+
+    private func clearOfflineCacheFields(for article: Article) {
+        let hadCachedData = article.hasOfflineContent || article.offlineCachedBytes > 0 || !article.offlineCachedHTML.isEmpty
+        article.offlineCachedHTML = ""
+        article.offlineCachedBytes = 0
+        article.offlineCachedAt = nil
+        article.offlineLastError = ""
+        article.offlineStatus = hadCachedData ? .evicted : .notCached
+    }
+
+    private func describeOfflineError(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            if urlError.code == .appTransportSecurityRequiresSecureConnection {
+                return "\(urlError.localizedDescription) (\(urlError.code.rawValue)). This article may be HTTP-only. Enable 'Allow Insecure HTTP Content (Per Feed)' in feed settings if you trust the source."
+            }
+            if urlError.code == .timedOut {
+                return "\(urlError.localizedDescription) (\(urlError.code.rawValue)). The source may be slow or blocking automated fetches. Try Retry Offline again, or open the original URL in browser to verify reachability."
+            }
+            return "\(urlError.localizedDescription) (\(urlError.code.rawValue))"
+        }
+        return error.localizedDescription
     }
 
     private func normalizedFolderName(_ raw: String) -> String {
@@ -1447,6 +1729,8 @@ private struct FeedScopeRow: View {
     let systemImage: String
     let sourceProxyEnabled: Bool
     let contentProxyEnabled: Bool
+    let offlinePolicy: FeedOfflinePolicy
+    let allowsInsecureHTTPContent: Bool
     let onSelectionTap: () -> Void
     var onTitleTap: (() -> Void)? = nil
 
@@ -1485,6 +1769,23 @@ private struct FeedScopeRow: View {
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Content access uses proxy")
             }
+            if offlinePolicy == .fullContent {
+                Image(systemName: "arrow.down.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Offline full content enabled")
+            } else if offlinePolicy == .metadataOnly {
+                Image(systemName: "text.justify")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Offline metadata mode")
+            }
+            if allowsInsecureHTTPContent {
+                Image(systemName: "exclamationmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Insecure HTTP content allowed for this feed")
+            }
         }
     }
 }
@@ -1505,6 +1806,12 @@ private struct ArticleRow: View {
                 if article.isStarred {
                     Image(systemName: "star.fill")
                         .foregroundStyle(.yellow)
+                }
+
+                if let indicator = offlineIndicator {
+                    Image(systemName: indicator.symbol)
+                        .foregroundStyle(indicator.color)
+                        .font(.caption)
                 }
 
                 if !article.isRead {
@@ -1529,6 +1836,21 @@ private struct ArticleRow: View {
         }
         .padding(.vertical, 4)
     }
+
+    private var offlineIndicator: (symbol: String, color: Color)? {
+        switch article.offlineStatus {
+        case .cached:
+            return ("arrow.down.circle.fill", .green)
+        case .caching:
+            return ("arrow.triangle.2.circlepath", .secondary)
+        case .failed:
+            return ("exclamationmark.triangle.fill", .orange)
+        case .evicted:
+            return ("tray.and.arrow.up", .secondary)
+        case .notCached:
+            return nil
+        }
+    }
 }
 
 private struct ArticleDetailView: View {
@@ -1539,10 +1861,12 @@ private struct ArticleDetailView: View {
     }
 
     @Bindable var article: Article
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
     let tags: [Tag]
     let onToggleTag: (Tag, Article) -> Void
     let onOpenTagManager: () -> Void
+    let onRetryOfflineCaching: () -> Void
     @State private var isBodyLoading = false
     @State private var showSkeleton = true
     @State private var bodyHTML: String = ""
@@ -1596,6 +1920,18 @@ private struct ArticleDetailView: View {
                     Label("Tags", systemImage: "tag")
                 }
 
+                if article.feed?.offlinePolicy == .fullContent {
+                    Button {
+                        onRetryOfflineCaching()
+                    } label: {
+                        Label(
+                            article.offlineStatus == .cached ? "Refresh Cache" : "Retry Offline",
+                            systemImage: "arrow.clockwise.circle"
+                        )
+                    }
+                    .disabled(article.offlineStatus == .caching)
+                }
+
                 if let url = URL(string: article.link), !article.link.isEmpty {
                     Menu {
                         Button {
@@ -1644,9 +1980,21 @@ private struct ArticleDetailView: View {
                     title: "Content",
                     usesProxy: contentPathUsesProxy
                 )
+                offlineStatusPill
+                if article.feed?.allowInsecureHTTPForContent == true {
+                    statusPill(title: "HTTP", value: "Allowed", icon: "exclamationmark.shield")
+                }
                 if contentLoadState == .fallbackSummary {
                     statusPill(title: "Fallback", value: "Summary", icon: "arrow.uturn.backward.circle")
                 }
+            }
+
+            if shouldShowOfflineFailureMessage {
+                Text("Offline cache failed: \(article.offlineLastError)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(3)
             }
 
             Divider()
@@ -1724,20 +2072,45 @@ private struct ArticleDetailView: View {
         let articleLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
         let proxy = article.feed?.contentProxyConfiguration
         let shouldUseProxyForContent = article.feed?.useProxyForContent ?? false
+        let allowInsecureHTTPContent = article.feed?.allowInsecureHTTPForContent ?? false
+        let offlinePolicy = article.feed?.offlinePolicy ?? .off
+        let cachedHTML = article.offlineCachedHTML
+        let hasCachedHTML = article.hasOfflineContent
+        let hasFallbackHTML = !fallbackHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let shouldPrimeWithFallback = offlinePolicy == .fullContent && !hasCachedHTML && hasFallbackHTML
 
         withAnimation(.easeInOut(duration: 0.12)) {
             contentPathUsesProxy = shouldUseProxyForContent
-            contentLoadState = .loading
-            bodyHTML = ""
-            isBodyLoading = true
-            showSkeleton = true
+            if shouldPrimeWithFallback {
+                contentLoadState = .fallbackSummary
+                bodyHTML = fallbackHTML
+                isBodyLoading = false
+                showSkeleton = false
+            } else {
+                contentLoadState = .loading
+                bodyHTML = ""
+                isBodyLoading = true
+                showSkeleton = true
+            }
         }
         lastSavedScrollProgress = article.readingScrollProgress
 
+        if hasCachedHTML {
+            withAnimation(.easeInOut(duration: 0.12)) {
+                contentLoadState = .loaded
+                bodyHTML = cachedHTML
+                isBodyLoading = false
+                showSkeleton = false
+            }
+            if offlinePolicy == .fullContent {
+                return
+            }
+        }
+
         guard let url = URL(string: articleLink), url.scheme?.hasPrefix("http") == true else {
             withAnimation(.easeInOut(duration: 0.12)) {
-                contentLoadState = .fallbackSummary
-                bodyHTML = fallbackHTML
+                contentLoadState = hasCachedHTML ? .loaded : .fallbackSummary
+                bodyHTML = hasCachedHTML ? cachedHTML : fallbackHTML
                 isBodyLoading = false
                 showSkeleton = false
             }
@@ -1746,18 +2119,63 @@ private struct ArticleDetailView: View {
 
         bodyLoadTask = Task {
             let selectedProxy: FeedProxyConfiguration? = shouldUseProxyForContent ? proxy : nil
-            let fetchedHTML = (try? await RSSService.fetchArticleHTML(from: url, proxy: selectedProxy))
+            let result: Result<String, Error>
+            do {
+                let fetched = try await RSSService.fetchArticleHTML(
+                    from: url,
+                    proxy: selectedProxy,
+                    allowInsecureHTTPInWebContent: allowInsecureHTTPContent
+                )
+                result = .success(fetched)
+            } catch {
+                result = .failure(error)
+            }
 
             await MainActor.run {
                 guard activeBodyLoadID == loadID else { return }
-                withAnimation(.easeInOut(duration: 0.12)) {
-                    contentLoadState = fetchedHTML == nil ? .fallbackSummary : .loaded
-                    bodyHTML = fetchedHTML ?? fallbackHTML
-                    isBodyLoading = false
-                    showSkeleton = false
+                guard !Task.isCancelled else { return }
+
+                switch result {
+                case .success(let fetchedHTML):
+                    if offlinePolicy == .fullContent {
+                        setOfflineCacheFromFetchedHTML(fetchedHTML)
+                    } else if article.offlineStatus == .failed {
+                        article.offlineStatus = .notCached
+                        article.offlineLastError = ""
+                        try? modelContext.save()
+                    }
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        contentLoadState = .loaded
+                        bodyHTML = fetchedHTML
+                        isBodyLoading = false
+                        showSkeleton = false
+                    }
+                case .failure(let error):
+                    if offlinePolicy == .fullContent {
+                        updateOfflineFailureState(error)
+                    }
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        if article.hasOfflineContent {
+                            contentLoadState = .loaded
+                            bodyHTML = article.offlineCachedHTML
+                        } else {
+                            contentLoadState = .fallbackSummary
+                            bodyHTML = fallbackHTML
+                        }
+                        isBodyLoading = false
+                        showSkeleton = false
+                    }
                 }
             }
         }
+    }
+
+    private var shouldShowOfflineFailureMessage: Bool {
+        let policy = article.feed?.offlinePolicy ?? .off
+        guard policy == .fullContent else { return false }
+        guard article.offlineStatus == .failed else { return false }
+        guard !article.offlineLastError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return bodyHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func persistReadingProgress(_ progress: Double) {
@@ -1765,6 +2183,74 @@ private struct ArticleDetailView: View {
         guard abs(clamped - lastSavedScrollProgress) >= 0.01 else { return }
         lastSavedScrollProgress = clamped
         article.readingScrollProgress = clamped
+    }
+
+    @ViewBuilder
+    private var offlineStatusPill: some View {
+        let policy = article.feed?.offlinePolicy ?? .off
+
+        switch policy {
+        case .off:
+            statusPill(title: "Offline", value: "Off", icon: "icloud")
+        case .metadataOnly:
+            statusPill(title: "Offline", value: "Meta", icon: "doc.text")
+        case .fullContent:
+            switch article.offlineStatus {
+            case .cached:
+                statusPill(title: "Offline", value: "Cached", icon: "arrow.down.circle")
+            case .caching:
+                statusPill(title: "Offline", value: "Caching", icon: "arrow.triangle.2.circlepath")
+            case .failed:
+                statusPill(title: "Offline", value: "Failed", icon: "exclamationmark.triangle")
+            case .evicted:
+                statusPill(title: "Offline", value: "Evicted", icon: "tray.and.arrow.up")
+            case .notCached:
+                statusPill(title: "Offline", value: "Pending", icon: "clock")
+            }
+        }
+    }
+
+    private func setOfflineCacheFromFetchedHTML(_ html: String) {
+        let normalized = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+
+        article.offlineCachedHTML = html
+        article.offlineCachedBytes = html.lengthOfBytes(using: .utf8)
+        article.offlineCachedAt = Date()
+        article.offlineStatus = .cached
+        article.offlineLastError = ""
+        try? modelContext.save()
+    }
+
+    private func updateOfflineFailureState(_ error: Error) {
+        let hasVisibleContent = !bodyHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if article.hasOfflineContent {
+            article.offlineStatus = .cached
+        } else if hasVisibleContent {
+            article.offlineStatus = .notCached
+            article.offlineLastError = ""
+            try? modelContext.save()
+            return
+        } else {
+            article.offlineStatus = .failed
+        }
+
+        if let urlError = error as? URLError {
+            if urlError.code == .appTransportSecurityRequiresSecureConnection {
+                article.offlineLastError = "\(urlError.localizedDescription) (\(urlError.code.rawValue)). This article may be HTTP-only. Enable 'Allow Insecure HTTP Content (Per Feed)' in feed settings if you trust the source."
+                try? modelContext.save()
+                return
+            }
+            if urlError.code == .timedOut {
+                article.offlineLastError = "\(urlError.localizedDescription) (\(urlError.code.rawValue)). The source may be slow or blocking automated fetches. Try Retry Offline again, or open the original URL in browser to verify reachability."
+                try? modelContext.save()
+                return
+            }
+            article.offlineLastError = "\(urlError.localizedDescription) (\(urlError.code.rawValue))"
+        } else {
+            article.offlineLastError = error.localizedDescription
+        }
+        try? modelContext.save()
     }
 
     private func copyToClipboard(_ text: String) {
@@ -2290,11 +2776,13 @@ private struct FeedFormView: View {
     @State private var urlString: String
     @State private var useProxy: Bool
     @State private var useProxyForContent: Bool
+    @State private var allowInsecureHTTPForContent: Bool
     @State private var proxyType: FeedProxyType
     @State private var proxyHost: String
     @State private var proxyPortString: String
     @State private var proxyUsername: String
     @State private var proxyPassword: String
+    @State private var offlinePolicy: FeedOfflinePolicy
     @State private var selectedFolderName: String
 
     let modeTitle: String
@@ -2303,11 +2791,13 @@ private struct FeedFormView: View {
     let initialURLString: String
     let initialUseProxy: Bool
     let initialUseProxyForContent: Bool
+    let initialAllowInsecureHTTPForContent: Bool
     let initialProxyType: FeedProxyType
     let initialProxyHost: String
     let initialProxyPort: Int?
     let initialProxyUsername: String
     let initialProxyPassword: String
+    let initialOfflinePolicy: FeedOfflinePolicy
     let initialFolderName: String
     let availableFolderNames: [String]
     let onSave: (FeedFormValues) -> Void
@@ -2319,11 +2809,13 @@ private struct FeedFormView: View {
         initialURLString: String,
         initialUseProxy: Bool,
         initialUseProxyForContent: Bool,
+        initialAllowInsecureHTTPForContent: Bool,
         initialProxyType: FeedProxyType,
         initialProxyHost: String,
         initialProxyPort: Int?,
         initialProxyUsername: String,
         initialProxyPassword: String,
+        initialOfflinePolicy: FeedOfflinePolicy,
         initialFolderName: String,
         availableFolderNames: [String],
         onSave: @escaping (FeedFormValues) -> Void
@@ -2334,11 +2826,13 @@ private struct FeedFormView: View {
         self.initialURLString = initialURLString
         self.initialUseProxy = initialUseProxy
         self.initialUseProxyForContent = initialUseProxyForContent
+        self.initialAllowInsecureHTTPForContent = initialAllowInsecureHTTPForContent
         self.initialProxyType = initialProxyType
         self.initialProxyHost = initialProxyHost
         self.initialProxyPort = initialProxyPort
         self.initialProxyUsername = initialProxyUsername
         self.initialProxyPassword = initialProxyPassword
+        self.initialOfflinePolicy = initialOfflinePolicy
         self.initialFolderName = initialFolderName
         self.availableFolderNames = availableFolderNames
         self.onSave = onSave
@@ -2346,11 +2840,13 @@ private struct FeedFormView: View {
         _urlString = State(initialValue: initialURLString)
         _useProxy = State(initialValue: initialUseProxy)
         _useProxyForContent = State(initialValue: initialUseProxyForContent)
+        _allowInsecureHTTPForContent = State(initialValue: initialAllowInsecureHTTPForContent)
         _proxyType = State(initialValue: initialProxyType)
         _proxyHost = State(initialValue: initialProxyHost)
         _proxyPortString = State(initialValue: initialProxyPort.map(String.init) ?? "")
         _proxyUsername = State(initialValue: initialProxyUsername)
         _proxyPassword = State(initialValue: initialProxyPassword)
+        _offlinePolicy = State(initialValue: initialOfflinePolicy)
         _selectedFolderName = State(initialValue: initialFolderName)
     }
 
@@ -2449,6 +2945,23 @@ private struct FeedFormView: View {
                     SecureField("Proxy Password (Optional)", text: $proxyPassword)
                 }
             }
+
+            Section("Offline Reading") {
+                Picker("Mode", selection: $offlinePolicy) {
+                    ForEach(FeedOfflinePolicy.allCases) { policy in
+                        Text(policy.displayName).tag(policy)
+                    }
+                }
+
+                Toggle("Allow Insecure HTTP Content (Per Feed)", isOn: $allowInsecureHTTPForContent)
+
+                Text("Full Content preloads article pages for offline reading. Metadata Only keeps feed metadata only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("When enabled, HTTP article pages for this feed can be loaded via Web content fallback. This is less secure than HTTPS.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -2459,15 +2972,144 @@ private struct FeedFormView: View {
                 urlString: urlString,
                 useProxy: useProxy,
                 useProxyForContent: useProxyForContent,
+                allowInsecureHTTPForContent: allowInsecureHTTPForContent,
                 proxyType: proxyType,
                 proxyHost: proxyHost,
                 proxyPort: Int(proxyPortString),
                 proxyUsername: proxyUsername,
                 proxyPassword: proxyPassword,
+                offlinePolicy: offlinePolicy,
                 folderName: selectedFolderName
             )
         )
         dismiss()
+    }
+}
+
+private struct OfflineStorageView: View {
+    @Environment(\.dismiss) private var dismiss
+    let totalCachedCount: Int
+    let totalCachedBytes: Int
+    let feedUsages: [OfflineCacheFeedUsage]
+    let onClearAll: () -> Void
+    let onClearFeed: (OfflineCacheFeedUsage) -> Void
+
+    private var totalBytesLabel: String {
+        ByteCountFormatter.string(fromByteCount: Int64(totalCachedBytes), countStyle: .file)
+    }
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text("Offline Storage")
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Label("\(totalCachedCount) cached articles", systemImage: "doc.text")
+                    Label(totalBytesLabel, systemImage: "internaldrive")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if feedUsages.isEmpty {
+                    ContentUnavailableView(
+                        "No Offline Cache",
+                        systemImage: "internaldrive",
+                        description: Text("Set a feed to Full Content and refresh to cache article pages.")
+                    )
+                } else {
+                    List {
+                        ForEach(feedUsages) { usage in
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(usage.feedTitle)
+                                        .lineLimit(1)
+                                    Text("\(usage.cachedCount) articles · \(ByteCountFormatter.string(fromByteCount: Int64(usage.cachedBytes), countStyle: .file))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Button("Clear") {
+                                    onClearFeed(usage)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    .frame(minHeight: 250)
+                }
+            }
+            .padding(12)
+
+            Divider()
+            HStack {
+                Button("Clear All Cache", role: .destructive) {
+                    onClearAll()
+                }
+                .disabled(feedUsages.isEmpty)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 560, height: 430)
+        #else
+        NavigationStack {
+            List {
+                Section("Summary") {
+                    Label("\(totalCachedCount) cached articles", systemImage: "doc.text")
+                    Label(totalBytesLabel, systemImage: "internaldrive")
+                }
+
+                if feedUsages.isEmpty {
+                    Section {
+                        Text("No offline cache yet.")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Per Feed") {
+                        ForEach(feedUsages) { usage in
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(usage.feedTitle)
+                                        .lineLimit(1)
+                                    Text("\(usage.cachedCount) · \(ByteCountFormatter.string(fromByteCount: Int64(usage.cachedBytes), countStyle: .file))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Button("Clear") {
+                                    onClearFeed(usage)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Offline Storage")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Clear All", role: .destructive) {
+                        onClearAll()
+                    }
+                    .disabled(feedUsages.isEmpty)
+                }
+            }
+        }
+        #endif
     }
 }
 

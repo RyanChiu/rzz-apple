@@ -1,6 +1,33 @@
 import Foundation
 import SwiftData
 
+enum FeedOfflinePolicy: String, CaseIterable, Codable, Identifiable {
+    case off
+    case metadataOnly
+    case fullContent
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .off:
+            return "Off"
+        case .metadataOnly:
+            return "Metadata Only"
+        case .fullContent:
+            return "Full Content"
+        }
+    }
+}
+
+enum ArticleOfflineStatus: String, Codable {
+    case notCached
+    case caching
+    case cached
+    case failed
+    case evicted
+}
+
 enum FeedProxyType: String, CaseIterable, Codable, Identifiable {
     case http
     case socks5
@@ -31,8 +58,10 @@ final class Feed {
     var title: String = ""
     var isTitleManuallySet: Bool = true
     var urlString: String = ""
+    var offlinePolicyRaw: String = FeedOfflinePolicy.off.rawValue
     var useProxy: Bool = false
     var useProxyForContent: Bool = false
+    var allowInsecureHTTPForContent: Bool = false
     var proxyTypeRaw: String = FeedProxyType.http.rawValue
     var proxyHost: String = ""
     var proxyPort: Int? = nil
@@ -66,6 +95,11 @@ final class Feed {
     var proxyType: FeedProxyType {
         get { FeedProxyType(rawValue: proxyTypeRaw) ?? .http }
         set { proxyTypeRaw = newValue.rawValue }
+    }
+
+    var offlinePolicy: FeedOfflinePolicy {
+        get { FeedOfflinePolicy(rawValue: offlinePolicyRaw) ?? .off }
+        set { offlinePolicyRaw = newValue.rawValue }
     }
 
     var proxyConfiguration: FeedProxyConfiguration? {
@@ -108,6 +142,11 @@ final class Article {
     var isRead: Bool = false
     var isStarred: Bool = false
     var readingScrollProgress: Double = 0
+    var offlineStatusRaw: String = ArticleOfflineStatus.notCached.rawValue
+    var offlineCachedHTML: String = ""
+    var offlineCachedBytes: Int = 0
+    var offlineCachedAt: Date?
+    var offlineLastError: String = ""
     @Relationship(inverse: \Tag.articles)
     var tags: [Tag] = []
 
@@ -134,6 +173,15 @@ final class Article {
         if !guid.isEmpty { return "guid:\(guid)" }
         if !link.isEmpty { return "link:\(link)" }
         return "title:\(title):\(publishedAt?.timeIntervalSince1970 ?? 0)"
+    }
+
+    var offlineStatus: ArticleOfflineStatus {
+        get { ArticleOfflineStatus(rawValue: offlineStatusRaw) ?? .notCached }
+        set { offlineStatusRaw = newValue.rawValue }
+    }
+
+    var hasOfflineContent: Bool {
+        offlineStatus == .cached && !offlineCachedHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

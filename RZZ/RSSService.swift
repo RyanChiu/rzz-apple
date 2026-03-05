@@ -37,6 +37,8 @@ enum RSSServiceError: LocalizedError {
 }
 
 enum RSSService {
+    private static let articleRequestTimeout: TimeInterval = 45
+
     static func fetchFeed(from url: URL, proxy: FeedProxyConfiguration? = nil) async throws -> ParsedFeed {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
@@ -110,19 +112,37 @@ enum RSSService {
         }
     }
 
-    static func fetchArticleHTML(from url: URL, proxy: FeedProxyConfiguration? = nil) async throws -> String {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 30
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+    static func fetchArticleHTML(
+        from url: URL,
+        proxy: FeedProxyConfiguration? = nil,
+        allowInsecureHTTPInWebContent: Bool = false
+    ) async throws -> String {
+        do {
+            return try await fetchArticleHTMLAttempt(from: url, proxy: proxy)
+        } catch {
+            if let urlError = error as? URLError,
+               urlError.code == .appTransportSecurityRequiresSecureConnection {
+                if let secureURL = upgradedHTTPSURL(from: url) {
+                    do {
+                        return try await fetchArticleHTMLAttempt(from: secureURL, proxy: proxy)
+                    } catch {
+                        if allowInsecureHTTPInWebContent, url.scheme?.lowercased() == "http" {
+                            return try await WebKitRSSFallback.fetchHTML(from: url, timeout: articleRequestTimeout)
+                        }
+                        throw error
+                    }
+                }
 
+                if allowInsecureHTTPInWebContent, url.scheme?.lowercased() == "http" {
+                    return try await WebKitRSSFallback.fetchHTML(from: url, timeout: articleRequestTimeout)
+                }
+            }
+            throw error
+        }
+    }
+
+    private static func fetchArticleHTMLAttempt(from url: URL, proxy: FeedProxyConfiguration?) async throws -> String {
+        let request = makeArticleRequest(url: url)
         do {
             let (data, response) = try await dataAndResponse(for: request, proxy: proxy, bypassSystemProxy: false)
             return try parseHTMLResponse(data: data, response: response)
@@ -133,6 +153,28 @@ enum RSSService {
             }
             throw error
         }
+    }
+
+    private static func makeArticleRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = articleRequestTimeout
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        return request
+    }
+
+    private static func upgradedHTTPSURL(from url: URL) -> URL? {
+        guard url.scheme?.lowercased() == "http" else { return nil }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        components.scheme = "https"
+        return components.url
     }
 
     private static func dataAndResponse(
