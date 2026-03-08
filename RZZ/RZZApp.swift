@@ -5,8 +5,9 @@ import SwiftData
 struct RZZApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("app_lock_enabled") private var appLockEnabled = false
-    @AppStorage("app_lock_pin_hash") private var appLockPINHash = ""
+    @AppStorage("app_lock_pin_hash") private var legacyAppLockPINHash = ""
 
+    @State private var appLockPINHash = ""
     @State private var isAppLocked = false
     @State private var shouldLockOnNextActive = false
 
@@ -32,7 +33,13 @@ struct RZZApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(isAppLocked: $isAppLocked)
+            ContentView(
+                isAppLocked: $isAppLocked,
+                appLockPINHash: $appLockPINHash
+            )
+            .task {
+                bootstrapAppLockPINHash()
+            }
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
@@ -52,6 +59,24 @@ struct RZZApp: App {
         }
         .onChange(of: appLockEnabled) { _, isEnabled in
             if !isEnabled {
+                isAppLocked = false
+                shouldLockOnNextActive = false
+            }
+        }
+    }
+
+    private func bootstrapAppLockPINHash() {
+        let migration = AppLockCredentialStore.migrateLegacyPINHashIfNeeded(legacyPINHash: &legacyAppLockPINHash)
+        switch migration {
+        case .clearedWithoutMigration:
+            appLockEnabled = false
+            appLockPINHash = ""
+            isAppLocked = false
+            shouldLockOnNextActive = false
+        case .notNeeded, .migrated:
+            appLockPINHash = AppLockCredentialStore.readPINHash()
+            if appLockPINHash.isEmpty {
+                appLockEnabled = false
                 isAppLocked = false
                 shouldLockOnNextActive = false
             }

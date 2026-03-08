@@ -1,5 +1,46 @@
 import SwiftUI
 import CryptoKit
+import Combine
+
+enum AppLockPINMigrationResult {
+    case notNeeded
+    case migrated
+    case clearedWithoutMigration
+}
+
+enum AppLockCredentialStore {
+    private static let account = "app-lock.pin-hash"
+
+    static func readPINHash() -> String {
+        SecureSecretStore.readPassword(forAccount: account)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    @discardableResult
+    static func savePINHash(_ pinHash: String) -> Bool {
+        let trimmed = pinHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            SecureSecretStore.deletePassword(forAccount: account)
+            return true
+        }
+        return SecureSecretStore.savePassword(trimmed, forAccount: account)
+    }
+
+    static func migrateLegacyPINHashIfNeeded(legacyPINHash: inout String) -> AppLockPINMigrationResult {
+        let legacy = legacyPINHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        defer { legacyPINHash = "" }
+        guard !legacy.isEmpty else { return .notNeeded }
+
+        if !readPINHash().isEmpty {
+            return .notNeeded
+        }
+
+        guard savePINHash(legacy) else {
+            return .clearedWithoutMigration
+        }
+        return .migrated
+    }
+}
 
 enum AppLockSecurity {
     private static let pattern = "^[A-Za-z0-9]{4,6}$"
@@ -127,8 +168,19 @@ struct AppLockSettingsView: View {
     }
 
     private func applyDraftAndDismiss() {
+        guard !draftIsEnabled || !draftPINHash.isEmpty else {
+            setMessage("Create a PIN before enabling app lock.", error: true)
+            return
+        }
+
+        if draftPINHash != pinHash {
+            guard AppLockCredentialStore.savePINHash(draftPINHash) else {
+                setMessage("Could not save PIN securely. Please check Keychain and try again.", error: true)
+                return
+            }
+            pinHash = draftPINHash
+        }
         isEnabled = draftIsEnabled
-        pinHash = draftPINHash
         dismiss()
     }
 
@@ -171,6 +223,12 @@ struct AppLockScreenView: View {
 
     @State private var pinInput = ""
     @State private var errorMessage: String?
+    @State private var failedAttempts = 0
+    @State private var lockoutUntil: Date?
+    @State private var now = Date()
+
+    // Use a higher-frequency ticker with low tolerance so lockout countdown feels stable.
+    private let lockoutTicker = Timer.publish(every: 0.2, tolerance: 0.05, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -204,12 +262,14 @@ struct AppLockScreenView: View {
                     SecureField("Enter PIN", text: $pinInput)
                         .textContentType(.password)
                         .onSubmit(tryUnlock)
+                        .disabled(isLockedOut)
                         .padding(12)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
                         .foregroundStyle(.white)
 
-                    if let errorMessage {
-                        Text(errorMessage)
+                    if let message = displayedMessage {
+                        Text(message)
+                            .monospacedDigit()
                             .font(.caption)
                             .foregroundStyle(.red.opacity(0.95))
                     }
@@ -217,13 +277,19 @@ struct AppLockScreenView: View {
                     Button("Unlock", action: tryUnlock)
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
-                        .disabled(pinInput.isEmpty)
+                        .disabled(pinInput.isEmpty || isLockedOut)
                 }
                 .padding(18)
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
                 .frame(maxWidth: 360)
             }
             .padding(24)
+        }
+        .onReceive(lockoutTicker) { tick in
+            now = tick
+            if let lockoutUntil, tick >= lockoutUntil {
+                self.lockoutUntil = nil
+            }
         }
     }
 
@@ -245,12 +311,44 @@ struct AppLockScreenView: View {
         .blur(radius: 2)
     }
 
+    private var isLockedOut: Bool {
+        guard let lockoutUntil else { return false }
+        return lockoutUntil > now
+    }
+
+    private var displayedMessage: String? {
+        if isLockedOut {
+            return "Too many attempts. Try again in \(lockoutRemainingSeconds)s."
+        }
+        return errorMessage
+    }
+
     private func tryUnlock() {
-        guard onUnlock(pinInput) else {
-            errorMessage = "Invalid PIN."
+        if isLockedOut {
             return
         }
+
+        guard onUnlock(pinInput) else {
+            failedAttempts += 1
+            if failedAttempts >= 3 {
+                let power = min(failedAttempts - 3, 5)
+                let cooldownSeconds = Int(pow(2.0, Double(power + 1)))
+                now = Date()
+                lockoutUntil = now.addingTimeInterval(Double(cooldownSeconds))
+                errorMessage = nil
+            } else {
+                errorMessage = "Invalid PIN."
+            }
+            return
+        }
+        failedAttempts = 0
+        lockoutUntil = nil
         errorMessage = nil
         pinInput = ""
+    }
+
+    private var lockoutRemainingSeconds: Int {
+        guard let lockoutUntil else { return 0 }
+        return max(1, Int(ceil(lockoutUntil.timeIntervalSince(now))))
     }
 }

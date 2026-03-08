@@ -1,6 +1,8 @@
 import SwiftUI
 import SwiftData
 import WebKit
+import UniformTypeIdentifiers
+import UserNotifications
 #if os(macOS)
 import AppKit
 #else
@@ -12,6 +14,42 @@ private enum ArticleFilter: String, CaseIterable, Identifiable {
     case starred
 
     var id: String { rawValue }
+}
+
+private enum BackupExportMode: String, CaseIterable, Identifiable {
+    case lite
+    case text
+    case full
+
+    var id: String { rawValue }
+
+    var menuTitle: String {
+        switch self {
+        case .lite:
+            return "Export Lite (Default)"
+        case .text:
+            return "Export Text"
+        case .full:
+            return "Export Full"
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .lite:
+            return "Lite"
+        case .text:
+            return "Text"
+        case .full:
+            return "Full"
+        }
+    }
+}
+
+private enum BackupExportStatusStyle {
+    case info
+    case success
+    case failure
 }
 
 private struct FeedEditDraft: Identifiable {
@@ -86,12 +124,12 @@ private struct OfflineCacheSummary {
 
 struct ContentView: View {
     @Binding var isAppLocked: Bool
+    @Binding var appLockPINHash: String
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\Feed.createdAt, order: .reverse)]) private var feeds: [Feed]
     @Query(sort: [SortDescriptor(\Article.publishedAt, order: .reverse), SortDescriptor(\Article.createdAt, order: .reverse)]) private var articles: [Article]
     @Query(sort: [SortDescriptor(\Tag.name, order: .forward), SortDescriptor(\Tag.createdAt, order: .forward)]) private var tags: [Tag]
     @AppStorage("app_lock_enabled") private var appLockEnabled = false
-    @AppStorage("app_lock_pin_hash") private var appLockPINHash = ""
     @AppStorage("last_feed_scope_all") private var lastFeedScopeAll = true
     @AppStorage("last_selected_feed_uuids") private var lastSelectedFeedUUIDsCSV = ""
     @AppStorage("last_article_filter") private var lastArticleFilterRaw = ArticleFilter.all.rawValue
@@ -113,8 +151,19 @@ struct ContentView: View {
     @State private var pendingDeletionRequest: FeedDeletionRequest?
     @State private var showSecuritySettings = false
     @State private var showOfflineStorage = false
+    @State private var showExportBackup = false
+    @State private var showImportBackup = false
+    @State private var showImportBackupConfirmation = false
     @State private var showTagManager = false
     @State private var didRestorePersistedUIState = false
+    @State private var transferMessage: String?
+    @State private var exportBackupDocument = RZZBackupDocument()
+    @State private var pendingBackupExportMode: BackupExportMode = .lite
+    @State private var backupExportStatusMessage: String?
+    @State private var backupExportStatusProgress: Double = 0
+    @State private var backupExportIsRunning = false
+    @State private var backupExportStatusStyle: BackupExportStatusStyle = .info
+    @State private var backupExportStatusToken = UUID()
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
     @State private var collapsedFolderNames: Set<String> = []
@@ -122,9 +171,11 @@ struct ContentView: View {
     @State private var offlineCachingArticleIDs: Set<PersistentIdentifier> = []
     @State private var offlineCacheGeneration: Int = 0
     @State private var didMigrateLegacyProxySecrets = false
+    @State private var exportBackupFilename = ""
 
     private let defaultFeedFolderName = "New Added"
     private let maxTagCount = 5
+    private let backupTextSummaryCharacterLimit = 20_000
 
     private var selectedTagFilter: Tag? {
         guard let uuid = UUID(uuidString: selectedTagFilterUUIDString) else { return nil }
@@ -331,6 +382,61 @@ struct ContentView: View {
                         Label("Security", systemImage: "lock")
                     }
                     .disabled(shouldShowLockScreen)
+
+                    Menu {
+                        Button {
+                            guard !shouldShowLockScreen else { return }
+                            triggerBackupExport(.lite)
+                        } label: {
+                            Label(BackupExportMode.lite.menuTitle, systemImage: "square.and.arrow.up")
+                        }
+
+                        Button {
+                            guard !shouldShowLockScreen else { return }
+                            triggerBackupExport(.text)
+                        } label: {
+                            Label(BackupExportMode.text.menuTitle, systemImage: "textformat")
+                        }
+
+                        Button {
+                            guard !shouldShowLockScreen else { return }
+                            triggerBackupExport(.full)
+                        } label: {
+                            Label(BackupExportMode.full.menuTitle, systemImage: "doc.richtext")
+                        }
+
+                        Divider()
+                        Button(role: .destructive) {
+                            guard !shouldShowLockScreen else { return }
+                            showImportBackupConfirmation = true
+                        } label: {
+                            #if os(macOS)
+                            Label("Import Latest Backup", systemImage: "square.and.arrow.down")
+                            #else
+                            Label("Import Data…", systemImage: "square.and.arrow.down")
+                            #endif
+                        }
+
+                        #if os(macOS)
+                        Divider()
+                        Button {
+                            guard !shouldShowLockScreen else { return }
+                            copyBackupFolderPathOnMac()
+                        } label: {
+                            Label("Copy Backup Folder Path", systemImage: "doc.on.doc")
+                        }
+
+                        Button {
+                            guard !shouldShowLockScreen else { return }
+                            revealBackupFolderOnMac()
+                        } label: {
+                            Label("Reveal Backups in Finder", systemImage: "folder")
+                        }
+                        #endif
+                    } label: {
+                        Label("Backup", systemImage: "archivebox")
+                    }
+                    .disabled(shouldShowLockScreen)
                 }
             }
     }
@@ -490,6 +596,39 @@ struct ContentView: View {
                 .presentationSizing(.fitted)
                 #endif
             }
+            .confirmationDialog(
+                "Import Backup and Replace Current Data?",
+                isPresented: $showImportBackupConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Import and Replace", role: .destructive) {
+                    #if os(macOS)
+                    importBackupOnMac()
+                    #else
+                    showImportBackup = true
+                    #endif
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will replace current feeds, articles, tags, and offline cache. Proxy passwords and app lock PIN are not imported.")
+            }
+            #if !os(macOS)
+            .fileExporter(
+                isPresented: $showExportBackup,
+                document: exportBackupDocument,
+                contentType: .json,
+                defaultFilename: exportBackupFilename
+            ) { result in
+                handleBackupExportResult(result)
+            }
+            .fileImporter(
+                isPresented: $showImportBackup,
+                allowedContentTypes: [.json],
+                allowsMultipleSelection: false
+            ) { result in
+                handleBackupImportResult(result)
+            }
+            #endif
     }
 
     private var bodyWithOverlays: some View {
@@ -514,6 +653,15 @@ struct ContentView: View {
 
     private var bodyWithAlerts: some View {
         bodyWithOverlays
+            .alert("Data Transfer", isPresented: Binding(get: {
+                transferMessage != nil
+            }, set: { newValue in
+                if !newValue { transferMessage = nil }
+            })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(transferMessage ?? "")
+            }
             .alert("Refresh Error", isPresented: Binding(get: {
                 refreshError != nil
             }, set: { newValue in
@@ -886,10 +1034,52 @@ struct ContentView: View {
                     .monospacedDigit()
                     .lineLimit(1)
             }
+
+            if let backupExportStatusMessage {
+                Divider()
+                    .frame(height: 14)
+                HStack(spacing: 6) {
+                    if backupExportIsRunning {
+                        ProgressView(value: backupExportStatusProgress)
+                            .frame(width: 72)
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: backupExportStatusIconName)
+                            .font(.caption2)
+                    }
+
+                    Text(backupExportStatusMessage)
+                        .font(.caption2)
+                        .foregroundStyle(backupExportStatusColor)
+                        .lineLimit(1)
+                }
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.thinMaterial)
+    }
+
+    private var backupExportStatusColor: Color {
+        switch backupExportStatusStyle {
+        case .info:
+            return .secondary
+        case .success:
+            return .green
+        case .failure:
+            return .red
+        }
+    }
+
+    private var backupExportStatusIconName: String {
+        switch backupExportStatusStyle {
+        case .info:
+            return "info.circle"
+        case .success:
+            return "checkmark.circle"
+        case .failure:
+            return "exclamationmark.triangle"
+        }
     }
 
     private var articleDetailPane: some View {
@@ -1575,6 +1765,470 @@ struct ContentView: View {
             return "\(urlError.localizedDescription) (\(urlError.code.rawValue))"
         }
         return error.localizedDescription
+    }
+
+    private func backupDefaultFilename(for mode: BackupExportMode) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return "RZZ-Backup-\(mode.displayName)-\(formatter.string(from: Date())).json"
+    }
+
+    private func triggerBackupExport(_ mode: BackupExportMode) {
+        pendingBackupExportMode = mode
+        #if os(macOS)
+        exportBackupOnMac(mode: mode)
+        #else
+        prepareBackupExport(mode: mode)
+        #endif
+    }
+
+    #if os(macOS)
+    private func exportBackupOnMac(mode: BackupExportMode = .lite) {
+        beginBackupExportStatus("Preparing \(mode.displayName) backup…", progress: 0.12)
+
+        Task(priority: .utility) {
+            do {
+                let package = await MainActor.run {
+                    buildBackupPackage(mode: mode)
+                }
+                await MainActor.run {
+                    updateBackupExportStatus("Encoding \(mode.displayName) backup…", progress: 0.56)
+                }
+
+                let data = try RZZBackupCodec.encode(package)
+                let fileURL = try await MainActor.run { () -> URL in
+                    let folderURL = try macBackupDirectoryURL()
+                    return folderURL.appendingPathComponent(backupDefaultFilename(for: mode))
+                }
+                await MainActor.run {
+                    updateBackupExportStatus("Writing \(mode.displayName) backup…", progress: 0.84)
+                }
+                try data.write(to: fileURL, options: .atomic)
+
+                await MainActor.run {
+                    finishBackupExportStatus("\(mode.displayName) backup exported", style: .success)
+                }
+                sendBackupCompletionNotificationIfAuthorized(
+                    title: "RZZ Backup Exported",
+                    body: fileURL.lastPathComponent
+                )
+            } catch {
+                await MainActor.run {
+                    finishBackupExportStatus("Export failed: \(error.localizedDescription)", style: .failure)
+                }
+            }
+        }
+    }
+
+    private func importBackupOnMac() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                importBackupOnMac()
+            }
+            return
+        }
+
+        do {
+            let folderURL = try macBackupDirectoryURL()
+            guard let latest = try latestBackupFileURL(in: folderURL) else {
+                transferMessage = "No backup JSON found in backup folder."
+                return
+            }
+            performBackupImport(from: latest)
+        } catch {
+            transferMessage = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func copyBackupFolderPathOnMac() {
+        do {
+            let folderURL = try macBackupDirectoryURL()
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(folderURL.path, forType: .string)
+            transferMessage = "Backup folder path copied:\n\(folderURL.path)"
+        } catch {
+            transferMessage = "Failed to copy backup folder path: \(error.localizedDescription)"
+        }
+    }
+
+    private func revealBackupFolderOnMac() {
+        do {
+            let folderURL = try macBackupDirectoryURL()
+            NSWorkspace.shared.activateFileViewerSelecting([folderURL])
+        } catch {
+            transferMessage = "Failed to open backup folder: \(error.localizedDescription)"
+        }
+    }
+
+    private func macBackupDirectoryURL() throws -> URL {
+        let fileManager = FileManager.default
+        let appSupportURL = try fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let bundleID = Bundle.main.bundleIdentifier ?? "sivaz.RZZ"
+        let folderURL = appSupportURL
+            .appendingPathComponent(bundleID, isDirectory: true)
+            .appendingPathComponent("Backups", isDirectory: true)
+
+        try fileManager.createDirectory(
+            at: folderURL,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        return folderURL
+    }
+
+    private func latestBackupFileURL(in folderURL: URL) throws -> URL? {
+        let fileManager = FileManager.default
+        let files = try fileManager.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ).filter { $0.pathExtension.lowercased() == "json" }
+
+        return files.max { lhs, rhs in
+            let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lhsDate < rhsDate
+        }
+    }
+    #endif
+
+    private func prepareBackupExport(mode: BackupExportMode = .lite) {
+        beginBackupExportStatus("Preparing \(mode.displayName) backup…", progress: 0.18)
+        exportBackupDocument = RZZBackupDocument(package: buildBackupPackage(mode: mode))
+        exportBackupFilename = backupDefaultFilename(for: mode)
+        showExportBackup = true
+        updateBackupExportStatus("Select where to save \(mode.displayName) backup…", progress: 0.38)
+    }
+
+    private func buildBackupPackage(mode: BackupExportMode = .full) -> RZZBackupPackage {
+        let sortedTags = tags.sorted {
+            if $0.name.caseInsensitiveCompare($1.name) == .orderedSame {
+                return $0.createdAt < $1.createdAt
+            }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+
+        let tagBackups = sortedTags.map { tag in
+            RZZBackupTag(
+                id: tag.id,
+                name: tag.name,
+                createdAt: tag.createdAt
+            )
+        }
+
+        let feedBackups = feeds
+            .sorted { $0.createdAt < $1.createdAt }
+            .map { feed in
+                let articleBackups = feed.articles
+                    .sorted { $0.createdAt < $1.createdAt }
+                    .map { article in
+                        let textOnlySummary = normalizedTextSummary(from: article.summary)
+                        let summaryForBackup: String
+                        let offlineStatusForBackup: String
+                        let offlineHTMLForBackup: String
+                        let offlineBytesForBackup: Int
+                        let offlineCachedAtForBackup: Date?
+                        let offlineErrorForBackup: String
+
+                        switch mode {
+                        case .lite:
+                            summaryForBackup = ""
+                            offlineStatusForBackup = ArticleOfflineStatus.notCached.rawValue
+                            offlineHTMLForBackup = ""
+                            offlineBytesForBackup = 0
+                            offlineCachedAtForBackup = nil
+                            offlineErrorForBackup = ""
+                        case .text:
+                            summaryForBackup = textOnlySummary
+                            offlineStatusForBackup = ArticleOfflineStatus.notCached.rawValue
+                            offlineHTMLForBackup = ""
+                            offlineBytesForBackup = 0
+                            offlineCachedAtForBackup = nil
+                            offlineErrorForBackup = ""
+                        case .full:
+                            summaryForBackup = article.summary
+                            offlineStatusForBackup = article.offlineStatusRaw
+                            offlineHTMLForBackup = article.offlineCachedHTML
+                            offlineBytesForBackup = article.offlineCachedBytes
+                            offlineCachedAtForBackup = article.offlineCachedAt
+                            offlineErrorForBackup = article.offlineLastError
+                        }
+
+                        return RZZBackupArticle(
+                            id: article.id,
+                            guid: article.guid,
+                            title: article.title,
+                            summary: summaryForBackup,
+                            link: article.link,
+                            publishedAt: article.publishedAt,
+                            createdAt: article.createdAt,
+                            isRead: article.isRead,
+                            isStarred: article.isStarred,
+                            readingScrollProgress: sanitizedProgress(article.readingScrollProgress),
+                            offlineStatusRaw: offlineStatusForBackup,
+                            offlineCachedHTML: offlineHTMLForBackup,
+                            offlineCachedBytes: offlineBytesForBackup,
+                            offlineCachedAt: offlineCachedAtForBackup,
+                            offlineLastError: offlineErrorForBackup,
+                            tagIDs: article.tags.map(\.id)
+                        )
+                    }
+
+                return RZZBackupFeed(
+                    id: feed.id,
+                    title: feed.title,
+                    isTitleManuallySet: feed.isTitleManuallySet,
+                    urlString: feed.urlString,
+                    offlinePolicyRaw: feed.offlinePolicyRaw,
+                    useProxy: feed.useProxy,
+                    useProxyForContent: feed.useProxyForContent,
+                    allowInsecureHTTPForContent: feed.allowInsecureHTTPForContent,
+                    proxyTypeRaw: feed.proxyTypeRaw,
+                    proxyHost: feed.proxyHost,
+                    proxyPort: feed.proxyPort,
+                    proxyUsername: feed.proxyUsername,
+                    hasProxyPassword: !feed.proxyPasswordValue.isEmpty,
+                    folderName: normalizedFolderName(feed.folderName),
+                    createdAt: feed.createdAt,
+                    lastFetchedAt: feed.lastFetchedAt,
+                    articles: articleBackups
+                )
+            }
+
+        return RZZBackupPackage(
+            version: RZZBackupPackage.currentVersion,
+            exportedAt: Date(),
+            settings: RZZBackupSettings(customFeedFolderNames: customFolderNames),
+            tags: tagBackups,
+            feeds: feedBackups
+        )
+    }
+
+    private func normalizedTextSummary(from raw: String) -> String {
+        let text = HTMLText.makePreview(from: raw)
+        guard !text.isEmpty else { return "" }
+        if text.count <= backupTextSummaryCharacterLimit {
+            return text
+        }
+        return String(text.prefix(backupTextSummaryCharacterLimit))
+    }
+
+    @MainActor
+    private func beginBackupExportStatus(_ message: String, progress: Double) {
+        backupExportStatusToken = UUID()
+        backupExportStatusMessage = message
+        backupExportStatusProgress = min(max(progress, 0), 1)
+        backupExportStatusStyle = .info
+        backupExportIsRunning = true
+    }
+
+    @MainActor
+    private func updateBackupExportStatus(_ message: String, progress: Double) {
+        backupExportStatusMessage = message
+        backupExportStatusProgress = min(max(progress, 0), 1)
+        backupExportStatusStyle = .info
+        backupExportIsRunning = true
+    }
+
+    @MainActor
+    private func finishBackupExportStatus(_ message: String, style: BackupExportStatusStyle) {
+        backupExportStatusToken = UUID()
+        let token = backupExportStatusToken
+        backupExportStatusMessage = message
+        backupExportStatusStyle = style
+        backupExportIsRunning = false
+        if style == .success {
+            backupExportStatusProgress = 1
+        }
+
+        let delaySeconds: Double = style == .failure ? 12 : 7
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+            await MainActor.run {
+                guard token == backupExportStatusToken else { return }
+                guard !backupExportIsRunning else { return }
+                backupExportStatusMessage = nil
+                backupExportStatusProgress = 0
+                backupExportStatusStyle = .info
+            }
+        }
+    }
+
+    private func isUserCancelled(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError
+    }
+
+    private func sendBackupCompletionNotificationIfAuthorized(title: String, body: String) {
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+                return
+            }
+
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            let request = UNNotificationRequest(
+                identifier: "rzz-backup-export-\(UUID().uuidString)",
+                content: content,
+                trigger: nil
+            )
+            try? await center.add(request)
+        }
+    }
+
+    private func handleBackupExportResult(_ result: Result<URL, Error>) {
+        let mode = pendingBackupExportMode
+        switch result {
+        case .success(let url):
+            finishBackupExportStatus("\(mode.displayName) backup exported", style: .success)
+            sendBackupCompletionNotificationIfAuthorized(
+                title: "RZZ Backup Exported",
+                body: url.lastPathComponent
+            )
+        case .failure(let error):
+            if isUserCancelled(error) {
+                finishBackupExportStatus("Export canceled", style: .info)
+            } else {
+                finishBackupExportStatus("Export failed: \(error.localizedDescription)", style: .failure)
+            }
+        }
+    }
+
+    private func handleBackupImportResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            performBackupImport(from: url)
+        case .failure(let error):
+            transferMessage = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func performBackupImport(from url: URL) {
+        do {
+            let data = try loadBackupData(from: url)
+            let package = try RZZBackupCodec.decode(data)
+            try importBackupPackage(package)
+
+            let importedFeedCount = package.feeds.count
+            let importedArticleCount = package.feeds.reduce(0) { $0 + $1.articles.count }
+            let importedTagCount = package.tags.count
+            transferMessage = "Import complete: \(importedFeedCount) feeds, \(importedArticleCount) articles, \(importedTagCount) tags."
+        } catch {
+            transferMessage = "Import failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func loadBackupData(from url: URL) throws -> Data {
+        let shouldStopAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if shouldStopAccessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        return try Data(contentsOf: url)
+    }
+
+    @MainActor
+    private func importBackupPackage(_ package: RZZBackupPackage) throws {
+        guard package.version == RZZBackupPackage.currentVersion else {
+            throw NSError(
+                domain: "RZZBackup",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Unsupported backup version \(package.version)."]
+            )
+        }
+
+        // Import is replace-all by design to keep restoration deterministic.
+        for feed in feeds {
+            feed.clearSecureProxyPassword()
+            modelContext.delete(feed)
+        }
+        for tag in tags {
+            modelContext.delete(tag)
+        }
+        for article in articles where article.feed == nil {
+            modelContext.delete(article)
+        }
+
+        offlineCacheGeneration += 1
+        offlineCachingArticleIDs.removeAll()
+        selectedArticleID = nil
+        selectedFeedIDs.removeAll()
+        isAllFeedsSelected = true
+        selectedTagFilterUUIDString = ""
+
+        saveCustomFolderNames(Set(package.settings.customFeedFolderNames.map(normalizedFolderName(_:))))
+
+        var tagByID: [UUID: Tag] = [:]
+        for backupTag in package.tags.sorted(by: { $0.createdAt < $1.createdAt }) {
+            let tag = Tag(name: backupTag.name)
+            tag.id = backupTag.id
+            tag.createdAt = backupTag.createdAt
+            modelContext.insert(tag)
+            tagByID[backupTag.id] = tag
+        }
+
+        for backupFeed in package.feeds.sorted(by: { $0.createdAt < $1.createdAt }) {
+            let feed = Feed(
+                title: backupFeed.title,
+                urlString: backupFeed.urlString,
+                folderName: normalizedFolderName(backupFeed.folderName),
+                isTitleManuallySet: backupFeed.isTitleManuallySet
+            )
+            feed.id = backupFeed.id
+            feed.offlinePolicyRaw = backupFeed.offlinePolicyRaw
+            feed.useProxy = backupFeed.useProxy
+            feed.useProxyForContent = backupFeed.useProxyForContent
+            feed.allowInsecureHTTPForContent = backupFeed.allowInsecureHTTPForContent
+            feed.proxyTypeRaw = backupFeed.proxyTypeRaw
+            feed.proxyHost = backupFeed.proxyHost
+            feed.proxyPort = backupFeed.proxyPort
+            feed.proxyUsername = backupFeed.proxyUsername
+            feed.proxyPassword = ""
+            feed.createdAt = backupFeed.createdAt
+            feed.lastFetchedAt = backupFeed.lastFetchedAt
+            modelContext.insert(feed)
+
+            for backupArticle in backupFeed.articles.sorted(by: { $0.createdAt < $1.createdAt }) {
+                let article = Article(
+                    guid: backupArticle.guid,
+                    title: backupArticle.title,
+                    summary: backupArticle.summary,
+                    link: backupArticle.link,
+                    publishedAt: backupArticle.publishedAt,
+                    feed: feed
+                )
+                article.id = backupArticle.id
+                article.createdAt = backupArticle.createdAt
+                article.isRead = backupArticle.isRead
+                article.isStarred = backupArticle.isStarred
+                article.readingScrollProgress = sanitizedProgress(backupArticle.readingScrollProgress)
+                article.offlineStatusRaw = backupArticle.offlineStatusRaw
+                article.offlineCachedHTML = backupArticle.offlineCachedHTML
+                article.offlineCachedBytes = backupArticle.offlineCachedBytes
+                article.offlineCachedAt = backupArticle.offlineCachedAt
+                article.offlineLastError = backupArticle.offlineLastError
+                article.tags = backupArticle.tagIDs.compactMap { tagByID[$0] }
+                modelContext.insert(article)
+            }
+        }
+
+        try modelContext.save()
+    }
+
+    private func sanitizedProgress(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
     }
 
     private func normalizedFolderName(_ raw: String) -> String {
@@ -3375,6 +4029,9 @@ private struct FolderFormView: View {
 }
 
 #Preview {
-    ContentView(isAppLocked: .constant(false))
+    ContentView(
+        isAppLocked: .constant(false),
+        appLockPINHash: .constant("")
+    )
         .modelContainer(for: [Feed.self, Article.self, Tag.self], inMemory: true)
 }
