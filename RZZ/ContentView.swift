@@ -52,6 +52,17 @@ private enum BackupExportStatusStyle {
     case failure
 }
 
+private enum LaunchRefreshStatusStyle {
+    case info
+    case success
+    case failure
+}
+
+private enum FeedRefreshOutcome {
+    case success(newArticleCount: Int)
+    case failure(message: String)
+}
+
 private struct FeedEditDraft: Identifiable {
     let id = UUID()
     let feedID: PersistentIdentifier
@@ -138,6 +149,7 @@ struct ContentView: View {
     @AppStorage("last_selected_article_uuid_starred") private var lastSelectedArticleUUIDStarredString = ""
     @AppStorage("last_selected_tag_uuid") private var lastSelectedTagUUIDString = ""
     @AppStorage("custom_feed_folder_names_json") private var customFeedFolderNamesJSON = "[]"
+    @AppStorage("auto_refresh_on_launch") private var autoRefreshOnLaunch = true
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
@@ -164,6 +176,12 @@ struct ContentView: View {
     @State private var backupExportIsRunning = false
     @State private var backupExportStatusStyle: BackupExportStatusStyle = .info
     @State private var backupExportStatusToken = UUID()
+    @State private var launchRefreshStatusMessage: String?
+    @State private var launchRefreshProgress: Double = 0
+    @State private var launchRefreshIsRunning = false
+    @State private var launchRefreshStatusStyle: LaunchRefreshStatusStyle = .info
+    @State private var launchRefreshStatusToken = UUID()
+    @State private var didScheduleLaunchAutoRefresh = false
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
     @State private var collapsedFolderNames: Set<String> = []
@@ -176,6 +194,8 @@ struct ContentView: View {
     private let defaultFeedFolderName = "New Added"
     private let maxTagCount = 5
     private let backupTextSummaryCharacterLimit = 20_000
+    private let launchAutoRefreshDelayNanoseconds: UInt64 = 1_200_000_000
+    private let launchAutoRefreshMinimumInterval: TimeInterval = 15 * 60
 
     private var selectedTagFilter: Tag? {
         guard let uuid = UUID(uuidString: selectedTagFilterUUIDString) else { return nil }
@@ -456,6 +476,7 @@ struct ContentView: View {
                 }
                 migrateLegacyProxySecretsIfNeeded()
                 restorePersistedUIStateIfNeeded()
+                scheduleLaunchAutoRefreshIfNeeded()
             }
             .onChange(of: displayedArticles.map(\.persistentModelID)) { _, visibleArticleIDs in
                 if let selectedArticleID, !visibleArticleIDs.contains(selectedArticleID) {
@@ -486,6 +507,7 @@ struct ContentView: View {
                 migrateLegacyProxySecretsIfNeeded()
                 restorePersistedUIStateIfNeeded()
                 selectedTagFilterUUIDString = lastSelectedTagUUIDString
+                scheduleLaunchAutoRefreshIfNeeded()
             }
     }
 
@@ -778,7 +800,7 @@ struct ContentView: View {
                                             beginEdit(feed: feed)
                                         }
                                         Button("Refresh") {
-                                            Task { await refreshSingleFeed(feed) }
+                                            Task { _ = await refreshSingleFeed(feed) }
                                         }
                                         Button("Delete", role: .destructive) {
                                             requestDeleteFeed(feed)
@@ -892,7 +914,7 @@ struct ContentView: View {
                     List(selection: $selectedArticleID) {
                         if shouldGroupArticleListByFeed {
                             let groups = groupedDisplayedArticles
-                            ForEach(Array(groups.enumerated()), id: \.element.feed.persistentModelID) { index, group in
+                            ForEach(groups, id: \.feed.persistentModelID) { group in
                                 Section {
                                     ForEach(group.articles) { article in
                                         articleListRow(article)
@@ -913,12 +935,6 @@ struct ContentView: View {
                                     }
                                     .padding(.top, 4)
                                     .textCase(nil)
-                                } footer: {
-                                    if index < groups.count - 1 {
-                                        Divider()
-                                            .padding(.top, 6)
-                                            .allowsHitTesting(false)
-                                    }
                                 }
                             }
                         } else {
@@ -1054,6 +1070,26 @@ struct ContentView: View {
                         .lineLimit(1)
                 }
             }
+
+            if let launchRefreshStatusMessage {
+                Divider()
+                    .frame(height: 14)
+                HStack(spacing: 6) {
+                    if launchRefreshIsRunning {
+                        ProgressView(value: launchRefreshProgress)
+                            .frame(width: 72)
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: launchRefreshStatusIconName)
+                            .font(.caption2)
+                    }
+
+                    Text(launchRefreshStatusMessage)
+                        .font(.caption2)
+                        .foregroundStyle(launchRefreshStatusColor)
+                        .lineLimit(1)
+                }
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1075,6 +1111,28 @@ struct ContentView: View {
         switch backupExportStatusStyle {
         case .info:
             return "info.circle"
+        case .success:
+            return "checkmark.circle"
+        case .failure:
+            return "exclamationmark.triangle"
+        }
+    }
+
+    private var launchRefreshStatusColor: Color {
+        switch launchRefreshStatusStyle {
+        case .info:
+            return .secondary
+        case .success:
+            return .green
+        case .failure:
+            return .red
+        }
+    }
+
+    private var launchRefreshStatusIconName: String {
+        switch launchRefreshStatusStyle {
+        case .info:
+            return "arrow.clockwise.circle"
         case .success:
             return "checkmark.circle"
         case .failure:
@@ -1304,7 +1362,7 @@ struct ContentView: View {
         selectedFeedIDs = [feed.persistentModelID]
         isAllFeedsSelected = false
 
-        await refreshSingleFeed(feed)
+        _ = await refreshSingleFeed(feed)
     }
 
     @MainActor
@@ -1360,7 +1418,7 @@ struct ContentView: View {
 
         try? modelContext.save()
         if previousFetchSignature != updatedFetchSignature {
-            await refreshSingleFeed(feed)
+            _ = await refreshSingleFeed(feed)
         } else if previousOfflinePolicy != feed.offlinePolicy && feed.offlinePolicy == .fullContent {
             enqueueOfflineCaching(for: feed.articles, feed: feed)
         }
@@ -1383,7 +1441,7 @@ struct ContentView: View {
         defer { isRefreshing = false }
 
         for feed in selectedFeeds {
-            await refreshSingleFeed(feed, showGlobalSpinner: false)
+            _ = await refreshSingleFeed(feed, showGlobalSpinner: false)
         }
     }
 
@@ -1394,15 +1452,98 @@ struct ContentView: View {
         defer { isRefreshing = false }
 
         for feed in feeds {
-            await refreshSingleFeed(feed, showGlobalSpinner: false)
+            _ = await refreshSingleFeed(feed, showGlobalSpinner: false)
+        }
+    }
+
+    private func scheduleLaunchAutoRefreshIfNeeded() {
+        guard autoRefreshOnLaunch else { return }
+        guard !didScheduleLaunchAutoRefresh else { return }
+        guard !feeds.isEmpty else { return }
+
+        didScheduleLaunchAutoRefresh = true
+        Task {
+            try? await Task.sleep(nanoseconds: launchAutoRefreshDelayNanoseconds)
+            await performLaunchAutoRefreshIfNeeded()
         }
     }
 
     @MainActor
-    private func refreshSingleFeed(_ feed: Feed, showGlobalSpinner: Bool = true) async {
-        guard let url = feed.url else {
-            refreshError = "Invalid URL for feed: \(feed.title)"
+    private func performLaunchAutoRefreshIfNeeded() async {
+        guard autoRefreshOnLaunch else { return }
+        guard !feeds.isEmpty else { return }
+
+        let staleFeeds = feeds.filter { feed in
+            guard let lastFetchedAt = feed.lastFetchedAt else { return true }
+            return Date().timeIntervalSince(lastFetchedAt) >= launchAutoRefreshMinimumInterval
+        }
+        if staleFeeds.isEmpty {
+            finishLaunchRefreshStatus("Auto refresh skipped (recently updated)", style: .info)
             return
+        }
+
+        let orderedFeeds = orderedFeedsForLaunchRefresh()
+        guard !orderedFeeds.isEmpty else { return }
+
+        beginLaunchRefreshStatus(
+            "Auto refresh: 0/\(orderedFeeds.count)",
+            progress: 0
+        )
+
+        var totalNew = 0
+        var failedCount = 0
+
+        for (index, feed) in orderedFeeds.enumerated() {
+            let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false, reportErrors: false)
+            switch outcome {
+            case .success(let newCount):
+                totalNew += newCount
+            case .failure:
+                failedCount += 1
+            }
+
+            let completed = index + 1
+            updateLaunchRefreshStatus(
+                "Auto refresh: \(completed)/\(orderedFeeds.count)",
+                progress: Double(completed) / Double(orderedFeeds.count)
+            )
+        }
+
+        if failedCount > 0 {
+            finishLaunchRefreshStatus(
+                "Auto refresh finished: \(totalNew) new, \(failedCount) failed",
+                style: .failure
+            )
+        } else if totalNew > 0 {
+            finishLaunchRefreshStatus("Auto refresh: \(totalNew) new articles", style: .success)
+            sendAutoRefreshNotificationIfAuthorized(newArticleCount: totalNew, feedCount: orderedFeeds.count)
+        } else {
+            finishLaunchRefreshStatus("Auto refresh complete: no new articles", style: .info)
+        }
+    }
+
+    private func orderedFeedsForLaunchRefresh() -> [Feed] {
+        guard !feeds.isEmpty else { return [] }
+        guard !isAllFeedsSelected, !selectedFeedIDs.isEmpty else { return feeds }
+
+        let selected = feeds.filter { selectedFeedIDs.contains($0.persistentModelID) }
+        let selectedIDSet = Set(selected.map(\.persistentModelID))
+        let rest = feeds.filter { !selectedIDSet.contains($0.persistentModelID) }
+        return selected + rest
+    }
+
+    @MainActor
+    private func refreshSingleFeed(
+        _ feed: Feed,
+        showGlobalSpinner: Bool = true,
+        reportErrors: Bool = true
+    ) async -> FeedRefreshOutcome {
+        guard let url = feed.url else {
+            let message = "Invalid URL for feed: \(feed.title)"
+            if reportErrors {
+                refreshError = message
+            }
+            return .failure(message: message)
         }
 
         if showGlobalSpinner {
@@ -1471,13 +1612,21 @@ struct ContentView: View {
                 let retryBatch = Array(retryCandidates.prefix(24))
                 enqueueOfflineCaching(for: retryBatch, feed: feed)
             }
+            return .success(newArticleCount: newArticles.count)
         } catch {
-            if let urlError = error as? URLError, urlError.code == .cannotFindHost {
-                refreshError = "DNS could not resolve host '\(url.host ?? "unknown")' (\(urlError.code.rawValue)). Try enabling proxy for this feed or check your network DNS settings."
-            } else {
-                refreshError = error.localizedDescription
+            let message = refreshFailureMessage(for: error, url: url)
+            if reportErrors {
+                refreshError = message
             }
+            return .failure(message: message)
         }
+    }
+
+    private func refreshFailureMessage(for error: Error, url: URL) -> String {
+        if let urlError = error as? URLError, urlError.code == .cannotFindHost {
+            return "DNS could not resolve host '\(url.host ?? "unknown")' (\(urlError.code.rawValue)). Try enabling proxy for this feed or check your network DNS settings."
+        }
+        return error.localizedDescription
     }
 
     private func deleteFeed(_ feed: Feed) {
@@ -2078,6 +2227,68 @@ struct ContentView: View {
             content.body = body
             let request = UNNotificationRequest(
                 identifier: "rzz-backup-export-\(UUID().uuidString)",
+                content: content,
+                trigger: nil
+            )
+            try? await center.add(request)
+        }
+    }
+
+    @MainActor
+    private func beginLaunchRefreshStatus(_ message: String, progress: Double) {
+        launchRefreshStatusToken = UUID()
+        launchRefreshStatusMessage = message
+        launchRefreshProgress = min(max(progress, 0), 1)
+        launchRefreshStatusStyle = .info
+        launchRefreshIsRunning = true
+    }
+
+    @MainActor
+    private func updateLaunchRefreshStatus(_ message: String, progress: Double) {
+        launchRefreshStatusMessage = message
+        launchRefreshProgress = min(max(progress, 0), 1)
+        launchRefreshStatusStyle = .info
+        launchRefreshIsRunning = true
+    }
+
+    @MainActor
+    private func finishLaunchRefreshStatus(_ message: String, style: LaunchRefreshStatusStyle) {
+        launchRefreshStatusToken = UUID()
+        let token = launchRefreshStatusToken
+        launchRefreshStatusMessage = message
+        launchRefreshStatusStyle = style
+        launchRefreshIsRunning = false
+        if style == .success {
+            launchRefreshProgress = 1
+        }
+
+        let delaySeconds: Double = style == .failure ? 12 : 8
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+            await MainActor.run {
+                guard token == launchRefreshStatusToken else { return }
+                guard !launchRefreshIsRunning else { return }
+                launchRefreshStatusMessage = nil
+                launchRefreshProgress = 0
+                launchRefreshStatusStyle = .info
+            }
+        }
+    }
+
+    private func sendAutoRefreshNotificationIfAuthorized(newArticleCount: Int, feedCount: Int) {
+        guard newArticleCount > 0 else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+                return
+            }
+
+            let content = UNMutableNotificationContent()
+            content.title = "RZZ Auto Refresh"
+            content.body = "\(newArticleCount) new articles from \(feedCount) feeds."
+            let request = UNNotificationRequest(
+                identifier: "rzz-auto-refresh-\(UUID().uuidString)",
                 content: content,
                 trigger: nil
             )
