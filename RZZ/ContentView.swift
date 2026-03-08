@@ -150,6 +150,8 @@ struct ContentView: View {
     @AppStorage("last_selected_tag_uuid") private var lastSelectedTagUUIDString = ""
     @AppStorage("custom_feed_folder_names_json") private var customFeedFolderNamesJSON = "[]"
     @AppStorage("auto_refresh_on_launch") private var autoRefreshOnLaunch = true
+    @AppStorage("last_refresh_status_summary") private var lastRefreshStatusSummary = "Never refreshed"
+    @AppStorage("last_refresh_status_at") private var lastRefreshStatusAt = 0.0
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
@@ -1025,6 +1027,16 @@ struct ContentView: View {
         return (title, readCount, unreadCount, allCount)
     }
 
+    private var persistentRefreshStatusText: String {
+        guard lastRefreshStatusAt > 0 else {
+            return lastRefreshStatusSummary
+        }
+        let date = Date(timeIntervalSince1970: lastRefreshStatusAt)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return "\(lastRefreshStatusSummary) · \(formatter.string(from: date))"
+    }
+
     private var scopeStatusBar: some View {
         HStack(spacing: 10) {
             Image(systemName: hasCustomFeedSelection ? "line.3.horizontal.decrease.circle.fill" : "tray.full.fill")
@@ -1039,6 +1051,18 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            }
+
+            Divider()
+                .frame(height: 14)
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(persistentRefreshStatusText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             if let stats = activeFeedStats {
@@ -1440,9 +1464,27 @@ struct ContentView: View {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        var totalNew = 0
+        var failedCount = 0
+
         for feed in selectedFeeds {
-            _ = await refreshSingleFeed(feed, showGlobalSpinner: false)
+            let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false)
+            switch outcome {
+            case .success(let newCount):
+                totalNew += newCount
+            case .failure:
+                failedCount += 1
+            }
         }
+
+        recordRefreshSummary(
+            buildRefreshSummary(
+                prefix: "Manual refresh",
+                totalNew: totalNew,
+                failedCount: failedCount,
+                feedCount: selectedFeeds.count
+            )
+        )
     }
 
     @MainActor
@@ -1451,9 +1493,27 @@ struct ContentView: View {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        var totalNew = 0
+        var failedCount = 0
+
         for feed in feeds {
-            _ = await refreshSingleFeed(feed, showGlobalSpinner: false)
+            let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false)
+            switch outcome {
+            case .success(let newCount):
+                totalNew += newCount
+            case .failure:
+                failedCount += 1
+            }
         }
+
+        recordRefreshSummary(
+            buildRefreshSummary(
+                prefix: "Manual refresh",
+                totalNew: totalNew,
+                failedCount: failedCount,
+                feedCount: feeds.count
+            )
+        )
     }
 
     private func scheduleLaunchAutoRefreshIfNeeded() {
@@ -1478,7 +1538,9 @@ struct ContentView: View {
             return Date().timeIntervalSince(lastFetchedAt) >= launchAutoRefreshMinimumInterval
         }
         if staleFeeds.isEmpty {
-            finishLaunchRefreshStatus("Auto refresh skipped (recently updated)", style: .info)
+            let summary = "Auto refresh skipped (recently updated)"
+            finishLaunchRefreshStatus(summary, style: .info)
+            recordRefreshSummary(summary)
             return
         }
 
@@ -1510,15 +1572,18 @@ struct ContentView: View {
         }
 
         if failedCount > 0 {
-            finishLaunchRefreshStatus(
-                "Auto refresh finished: \(totalNew) new, \(failedCount) failed",
-                style: .failure
-            )
+            let summary = "Auto refresh finished: \(totalNew) new, \(failedCount) failed"
+            finishLaunchRefreshStatus(summary, style: .failure)
+            recordRefreshSummary(summary)
         } else if totalNew > 0 {
-            finishLaunchRefreshStatus("Auto refresh: \(totalNew) new articles", style: .success)
+            let summary = "Auto refresh: \(totalNew) new articles"
+            finishLaunchRefreshStatus(summary, style: .success)
+            recordRefreshSummary(summary)
             sendAutoRefreshNotificationIfAuthorized(newArticleCount: totalNew, feedCount: orderedFeeds.count)
         } else {
-            finishLaunchRefreshStatus("Auto refresh complete: no new articles", style: .info)
+            let summary = "Auto refresh complete: no new articles"
+            finishLaunchRefreshStatus(summary, style: .info)
+            recordRefreshSummary(summary)
         }
     }
 
@@ -1530,6 +1595,27 @@ struct ContentView: View {
         let selectedIDSet = Set(selected.map(\.persistentModelID))
         let rest = feeds.filter { !selectedIDSet.contains($0.persistentModelID) }
         return selected + rest
+    }
+
+    @MainActor
+    private func recordRefreshSummary(_ summary: String) {
+        lastRefreshStatusSummary = summary
+        lastRefreshStatusAt = Date().timeIntervalSince1970
+    }
+
+    private func buildRefreshSummary(
+        prefix: String,
+        totalNew: Int,
+        failedCount: Int,
+        feedCount: Int
+    ) -> String {
+        if failedCount > 0 {
+            return "\(prefix): \(totalNew) new, \(failedCount) failed (\(feedCount) feeds)"
+        }
+        if totalNew > 0 {
+            return "\(prefix): \(totalNew) new (\(feedCount) feeds)"
+        }
+        return "\(prefix): no new (\(feedCount) feeds)"
     }
 
     @MainActor
