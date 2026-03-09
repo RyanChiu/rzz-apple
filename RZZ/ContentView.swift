@@ -63,6 +63,21 @@ private enum FeedRefreshOutcome {
     case failure(message: String)
 }
 
+private enum FeedRefreshDetailStatus {
+    case success
+    case failure
+}
+
+private struct FeedRefreshDetail: Identifiable {
+    let id = UUID()
+    let feedID: PersistentIdentifier?
+    let feedTitle: String
+    let status: FeedRefreshDetailStatus
+    let detail: String
+
+    var isFailure: Bool { status == .failure }
+}
+
 private struct FeedEditDraft: Identifiable {
     let id = UUID()
     let feedID: PersistentIdentifier
@@ -183,6 +198,10 @@ struct ContentView: View {
     @State private var launchRefreshIsRunning = false
     @State private var launchRefreshStatusStyle: LaunchRefreshStatusStyle = .info
     @State private var launchRefreshStatusToken = UUID()
+    @State private var showRefreshDetails = false
+    @State private var lastRefreshDetailTitle = "Latest Refresh"
+    @State private var lastRefreshDetails: [FeedRefreshDetail] = []
+    @State private var lastRefreshDetailsAt: TimeInterval = 0
     @State private var didScheduleLaunchAutoRefresh = false
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
@@ -615,6 +634,19 @@ struct ContentView: View {
                     feedUsages: offlineCacheSummary.feedUsages,
                     onClearAll: clearAllOfflineCache,
                     onClearFeed: clearOfflineCache(forUsage:)
+                )
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
+            .sheet(isPresented: $showRefreshDetails) {
+                RefreshDetailsView(
+                    title: lastRefreshDetailTitle,
+                    timestamp: lastRefreshDetailsAt > 0 ? Date(timeIntervalSince1970: lastRefreshDetailsAt) : nil,
+                    details: lastRefreshDetails,
+                    onRetryFailedOnly: {
+                        Task { await retryFailedFeedsFromLastRefresh() }
+                    }
                 )
                 #if os(macOS)
                 .presentationSizing(.fitted)
@@ -1055,15 +1087,22 @@ struct ContentView: View {
 
             Divider()
                 .frame(height: 14)
-            HStack(spacing: 6) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(persistentRefreshStatusText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            Button {
+                showRefreshDetails = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(persistentRefreshStatusText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
+            .buttonStyle(.plain)
+            .disabled(lastRefreshDetails.isEmpty)
+            .help(lastRefreshDetails.isEmpty ? "No refresh details yet" : "Show refresh details")
 
             if let stats = activeFeedStats {
                 Divider()
@@ -1466,9 +1505,11 @@ struct ContentView: View {
 
         var totalNew = 0
         var failedCount = 0
+        var details: [FeedRefreshDetail] = []
 
         for feed in selectedFeeds {
             let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false)
+            details.append(makeRefreshDetail(feed: feed, outcome: outcome))
             switch outcome {
             case .success(let newCount):
                 totalNew += newCount
@@ -1477,6 +1518,7 @@ struct ContentView: View {
             }
         }
 
+        recordRefreshDetails(title: "Manual Refresh", details: details)
         recordRefreshSummary(
             buildRefreshSummary(
                 prefix: "Manual refresh",
@@ -1495,9 +1537,11 @@ struct ContentView: View {
 
         var totalNew = 0
         var failedCount = 0
+        var details: [FeedRefreshDetail] = []
 
         for feed in feeds {
             let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false)
+            details.append(makeRefreshDetail(feed: feed, outcome: outcome))
             switch outcome {
             case .success(let newCount):
                 totalNew += newCount
@@ -1506,6 +1550,7 @@ struct ContentView: View {
             }
         }
 
+        recordRefreshDetails(title: "Manual Refresh", details: details)
         recordRefreshSummary(
             buildRefreshSummary(
                 prefix: "Manual refresh",
@@ -1540,6 +1585,7 @@ struct ContentView: View {
         if staleFeeds.isEmpty {
             let summary = "Auto refresh skipped (recently updated)"
             finishLaunchRefreshStatus(summary, style: .info)
+            recordRefreshDetails(title: "Auto Refresh", details: [])
             recordRefreshSummary(summary)
             return
         }
@@ -1554,9 +1600,11 @@ struct ContentView: View {
 
         var totalNew = 0
         var failedCount = 0
+        var details: [FeedRefreshDetail] = []
 
         for (index, feed) in orderedFeeds.enumerated() {
             let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false, reportErrors: false)
+            details.append(makeRefreshDetail(feed: feed, outcome: outcome))
             switch outcome {
             case .success(let newCount):
                 totalNew += newCount
@@ -1574,15 +1622,18 @@ struct ContentView: View {
         if failedCount > 0 {
             let summary = "Auto refresh finished: \(totalNew) new, \(failedCount) failed"
             finishLaunchRefreshStatus(summary, style: .failure)
+            recordRefreshDetails(title: "Auto Refresh", details: details)
             recordRefreshSummary(summary)
         } else if totalNew > 0 {
             let summary = "Auto refresh: \(totalNew) new articles"
             finishLaunchRefreshStatus(summary, style: .success)
+            recordRefreshDetails(title: "Auto Refresh", details: details)
             recordRefreshSummary(summary)
             sendAutoRefreshNotificationIfAuthorized(newArticleCount: totalNew, feedCount: orderedFeeds.count)
         } else {
             let summary = "Auto refresh complete: no new articles"
             finishLaunchRefreshStatus(summary, style: .info)
+            recordRefreshDetails(title: "Auto Refresh", details: details)
             recordRefreshSummary(summary)
         }
     }
@@ -1601,6 +1652,72 @@ struct ContentView: View {
     private func recordRefreshSummary(_ summary: String) {
         lastRefreshStatusSummary = summary
         lastRefreshStatusAt = Date().timeIntervalSince1970
+    }
+
+    @MainActor
+    private func recordRefreshDetails(title: String, details: [FeedRefreshDetail]) {
+        lastRefreshDetailTitle = title
+        lastRefreshDetails = details
+        lastRefreshDetailsAt = Date().timeIntervalSince1970
+    }
+
+    private func makeRefreshDetail(feed: Feed, outcome: FeedRefreshOutcome) -> FeedRefreshDetail {
+        let feedTitle = feed.title.isEmpty ? feed.urlString : feed.title
+        switch outcome {
+        case .success(let newArticleCount):
+            let detail = newArticleCount > 0 ? "\(newArticleCount) new article(s)" : "No new articles"
+            return FeedRefreshDetail(
+                feedID: feed.persistentModelID,
+                feedTitle: feedTitle,
+                status: .success,
+                detail: detail
+            )
+        case .failure(let message):
+            return FeedRefreshDetail(
+                feedID: feed.persistentModelID,
+                feedTitle: feedTitle,
+                status: .failure,
+                detail: message
+            )
+        }
+    }
+
+    @MainActor
+    private func retryFailedFeedsFromLastRefresh() async {
+        let failedIDs = Set(lastRefreshDetails.filter(\.isFailure).compactMap(\.feedID))
+        guard !failedIDs.isEmpty else { return }
+
+        let failedFeeds = feeds.filter { failedIDs.contains($0.persistentModelID) }
+        guard !failedFeeds.isEmpty else { return }
+
+        showRefreshDetails = false
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        var totalNew = 0
+        var failedCount = 0
+        var details: [FeedRefreshDetail] = []
+
+        for feed in failedFeeds {
+            let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false)
+            details.append(makeRefreshDetail(feed: feed, outcome: outcome))
+            switch outcome {
+            case .success(let newCount):
+                totalNew += newCount
+            case .failure:
+                failedCount += 1
+            }
+        }
+
+        recordRefreshDetails(title: "Retry Failed Feeds", details: details)
+        recordRefreshSummary(
+            buildRefreshSummary(
+                prefix: "Retry failed",
+                totalNew: totalNew,
+                failedCount: failedCount,
+                feedCount: failedFeeds.count
+            )
+        )
     }
 
     private func buildRefreshSummary(
@@ -4122,6 +4239,153 @@ private struct FeedFormView: View {
             )
         )
         dismiss()
+    }
+}
+
+private struct RefreshDetailsView: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let timestamp: Date?
+    let details: [FeedRefreshDetail]
+    let onRetryFailedOnly: () -> Void
+
+    private var failedCount: Int {
+        details.filter(\.isFailure).count
+    }
+
+    private var succeededCount: Int {
+        details.count - failedCount
+    }
+
+    private var timestampLabel: String? {
+        guard let timestamp else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: timestamp)
+    }
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                    if let timestampLabel {
+                        Text(timestampLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Label("\(succeededCount) success", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                    Label("\(failedCount) failed", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(failedCount > 0 ? .red : .secondary)
+                }
+                .font(.caption)
+
+                if details.isEmpty {
+                    ContentUnavailableView(
+                        "No Details",
+                        systemImage: "clock.badge.questionmark",
+                        description: Text("Run a refresh to see per-feed results.")
+                    )
+                } else {
+                    List(details) { item in
+                        HStack(spacing: 8) {
+                            Image(systemName: item.isFailure ? "xmark.circle.fill" : "checkmark.circle.fill")
+                                .foregroundStyle(item.isFailure ? .red : .green)
+                                .font(.caption)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.feedTitle)
+                                    .lineLimit(1)
+                                Text(item.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(item.isFailure ? .red : .secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .frame(minHeight: 260)
+                }
+            }
+            .padding(12)
+
+            Divider()
+            HStack {
+                Button("Retry Failed Only") {
+                    onRetryFailedOnly()
+                }
+                .disabled(failedCount == 0)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 620, height: 470)
+        #else
+        NavigationStack {
+            List {
+                Section("Summary") {
+                    Label("\(succeededCount) success", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                    Label("\(failedCount) failed", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(failedCount > 0 ? .red : .secondary)
+                    if let timestampLabel {
+                        Text(timestampLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Feeds") {
+                    if details.isEmpty {
+                        Text("No details yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(details) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: item.isFailure ? "xmark.circle.fill" : "checkmark.circle.fill")
+                                        .foregroundStyle(item.isFailure ? .red : .green)
+                                        .font(.caption)
+                                    Text(item.feedTitle)
+                                        .lineLimit(1)
+                                }
+                                Text(item.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(item.isFailure ? .red : .secondary)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Retry Failed") {
+                        onRetryFailedOnly()
+                    }
+                    .disabled(failedCount == 0)
+                }
+            }
+        }
+        #endif
     }
 }
 
