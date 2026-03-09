@@ -3369,10 +3369,16 @@ private struct ArticleHTMLView: View {
         h1 { font-size: 1.55em; }
         h2 { font-size: 1.35em; }
         h3 { font-size: 1.2em; }
-        img, video, iframe, svg, canvas {
+        img, video, iframe, canvas {
           max-width: 100% !important;
           height: auto !important;
           border-radius: 8px;
+        }
+        svg {
+          width: auto !important;
+          max-width: 100% !important;
+          height: auto !important;
+          vertical-align: middle;
         }
         table, pre, code {
           max-width: 100% !important;
@@ -3399,7 +3405,125 @@ private struct ArticleHTMLView: View {
             return "";
           }
 
+          function containsToken(text, tokens) {
+            if (!text) return false;
+            var lower = String(text).toLowerCase();
+            for (var i = 0; i < tokens.length; i++) {
+              if (lower.indexOf(tokens[i]) >= 0) return true;
+            }
+            return false;
+          }
+
           function normalizeMedia() {
+            var iconTokens = [
+              "icon", "social", "share", "follow",
+              "twitter", "x.com", "x-twitter", "reddit", "weibo", "wechat",
+              "facebook", "instagram", "linkedin", "telegram", "mastodon", "threads", "bluesky",
+              "arrow", "chevron", "caret", "next", "prev", "previous", "forward", "back"
+            ];
+
+            function clampAsIcon(el) {
+              el.style.width = "1.1em";
+              el.style.height = "1.1em";
+              el.style.maxWidth = "1.1em";
+              el.style.maxHeight = "1.1em";
+              el.style.objectFit = "contain";
+              el.style.borderRadius = "0";
+              el.style.display = "inline-block";
+              el.style.verticalAlign = "middle";
+            }
+
+            function parseViewBoxSize(el) {
+              var viewBox = el.getAttribute("viewBox");
+              if (!viewBox) return null;
+              var parts = String(viewBox).trim().split(/[\\s,]+/).map(Number);
+              if (parts.length !== 4 || parts.some(function(v) { return !isFinite(v); })) return null;
+              var w = Math.abs(parts[2]);
+              var h = Math.abs(parts[3]);
+              if (!w || !h) return null;
+              return { width: w, height: h };
+            }
+
+            function parseNumericAttr(el, name) {
+              var raw = el.getAttribute(name);
+              if (!raw) return null;
+              var value = parseFloat(String(raw).replace(/[^0-9.\\-]/g, ""));
+              return isFinite(value) && value > 0 ? value : null;
+            }
+
+            function looksLikeIcon(el) {
+              var parent = el.parentElement;
+              var blob = [
+                el.className || "",
+                el.id || "",
+                el.getAttribute("alt") || "",
+                el.getAttribute("title") || "",
+                el.getAttribute("aria-label") || "",
+                el.getAttribute("src") || "",
+                parent ? (parent.className || "") : "",
+                parent ? (parent.id || "") : "",
+                parent ? (parent.getAttribute("aria-label") || "") : ""
+              ].join(" ");
+
+              if (containsToken(blob, iconTokens)) return true;
+
+              var trigger = el.closest("a, button");
+              var svgBox = el.tagName === "svg" || el.tagName === "SVG" ? parseViewBoxSize(el) : null;
+              var attrWidth = parseNumericAttr(el, "width");
+              var attrHeight = parseNumericAttr(el, "height");
+
+              if (!trigger) {
+                if (svgBox && svgBox.width <= 96 && svgBox.height <= 96) return true;
+                if (attrWidth && attrHeight && attrWidth <= 96 && attrHeight <= 96) return true;
+                return false;
+              }
+
+              var triggerBlob = [
+                trigger.getAttribute("href") || "",
+                trigger.className || "",
+                trigger.id || "",
+                trigger.getAttribute("aria-label") || "",
+                trigger.getAttribute("title") || "",
+                trigger.textContent || ""
+              ].join(" ");
+
+              if (containsToken(triggerBlob, iconTokens)) return true;
+
+              if (svgBox && svgBox.width <= 128 && svgBox.height <= 128) return true;
+              if (attrWidth && attrHeight && attrWidth <= 128 && attrHeight <= 128) return true;
+
+              if ((el.tagName === "svg" || el.tagName === "SVG")
+                  && trigger.children.length <= 4
+                  && (trigger.textContent || "").trim().length <= 80) {
+                return true;
+              }
+
+              var triggerText = (trigger.textContent || "").trim();
+              if (triggerText.length <= 2 && trigger.children.length <= 2) return true;
+
+              return false;
+            }
+
+            function applySizeHints(el) {
+              var styleHint = el.getAttribute("data-rzz-style");
+              if (!styleHint) return;
+              function pick(prop) {
+                var re = new RegExp("(?:^|;)\\s*" + prop + "\\s*:\\s*([^;]+)", "i");
+                var m = styleHint.match(re);
+                return (m && m[1]) ? String(m[1]).trim() : "";
+              }
+              var width = pick("width");
+              var height = pick("height");
+              var maxWidth = pick("max-width");
+              var maxHeight = pick("max-height");
+              var objectFit = pick("object-fit");
+              if (width) el.style.width = width;
+              if (height) el.style.height = height;
+              if (maxWidth) el.style.maxWidth = maxWidth;
+              if (maxHeight) el.style.maxHeight = maxHeight;
+              if (objectFit) el.style.objectFit = objectFit;
+            }
+
             var imgs = document.querySelectorAll("img");
             imgs.forEach(function(img) {
               var src = firstAttr(img, ["src", "data-src", "data-original", "data-url", "data-lazy-src", "data-ks-lazyload"]);
@@ -3410,6 +3534,14 @@ private struct ArticleHTMLView: View {
                 var srcset = firstAttr(img, ["data-srcset", "srcset"]);
                 if (srcset) img.setAttribute("srcset", srcset);
               }
+              applySizeHints(img);
+              if (looksLikeIcon(img)) clampAsIcon(img);
+            });
+
+            var svgs = document.querySelectorAll("svg");
+            svgs.forEach(function(svg) {
+              applySizeHints(svg);
+              if (looksLikeIcon(svg)) clampAsIcon(svg);
             });
           }
 
@@ -3488,9 +3620,23 @@ private struct ArticleHTMLView: View {
             output = regex.stringByReplacingMatches(in: output, options: [], range: range, withTemplate: "")
         }
 
+        // Preserve a limited style hint on img/svg so tiny inline media/icons
+        // do not expand unexpectedly after global style attribute stripping.
+        if let mediaStyleRegex = try? NSRegularExpression(
+            pattern: "(<(?:img|svg)\\b[^>]*?)\\sstyle\\s*=\\s*(\"[^\"]*\"|'[^']*')",
+            options: [.caseInsensitive]
+        ) {
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = mediaStyleRegex.stringByReplacingMatches(
+                in: output,
+                options: [],
+                range: range,
+                withTemplate: "$1 data-rzz-style=$2"
+            )
+        }
+
         let attributePatterns: [String] = [
             "\\sstyle\\s*=\\s*(\"[^\"]*\"|'[^']*')",
-            "\\s(?:width|height)\\s*=\\s*(\"[^\"]*\"|'[^']*'|\\S+)",
             "\\son\\w+\\s*=\\s*(\"[^\"]*\"|'[^']*')"
         ]
 
