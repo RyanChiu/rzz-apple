@@ -825,6 +825,7 @@ struct ContentView: View {
            AppLockCredentialStore.savePINHash(upgradedHash) {
             appLockPINHash = upgradedHash
         }
+        AppLockPINLengthStore.saveLength(pin.count)
         isAppLocked = false
         return true
     }
@@ -883,14 +884,20 @@ struct ContentView: View {
                                         onTitleTap: { requestFocusForSelectedFeed(feed) }
                                     )
                                     .contextMenu {
-                                        Button("Edit") {
+                                        Button {
                                             beginEdit(feed: feed)
+                                        } label: {
+                                            Label("Edit", systemImage: "pencil")
                                         }
-                                        Button("Refresh") {
+                                        Button {
                                             Task { _ = await refreshSingleFeed(feed) }
+                                        } label: {
+                                            Label("Refresh", systemImage: "arrow.clockwise")
                                         }
-                                        Button("Delete", role: .destructive) {
+                                        Button(role: .destructive) {
                                             requestDeleteFeed(feed)
+                                        } label: {
+                                            Label("Delete", systemImage: "trash")
                                         }
                                     }
                                 }
@@ -908,20 +915,26 @@ struct ContentView: View {
                             }
                             .contentShape(Rectangle())
                             .contextMenu {
-                                Button("New Folder") {
+                                Button {
                                     showCreateFolderSheet = true
+                                } label: {
+                                    Label("New Folder", systemImage: "folder.badge.plus")
                                 }
 
-                                Button("Rename Folder") {
+                                Button {
                                     folderRenameDraft = FolderRenameDraft(
                                         originalName: group.name,
                                         currentName: group.name
                                     )
+                                } label: {
+                                    Label("Rename Folder", systemImage: "square.and.pencil")
                                 }
                                 .disabled(group.name == defaultFeedFolderName)
 
-                                Button("Delete Folder", role: .destructive) {
+                                Button(role: .destructive) {
                                     deleteFolder(named: group.name)
+                                } label: {
+                                    Label("Delete Folder", systemImage: "trash")
                                 }
                                 .disabled(group.name == defaultFeedFolderName)
                             }
@@ -949,8 +962,10 @@ struct ContentView: View {
                     .accessibilityLabel("Article Filter")
 
                     Menu {
-                        Button("Any Tag") {
+                        Button {
                             selectedTagFilterUUIDString = ""
+                        } label: {
+                            Label("Any Tag", systemImage: "line.3.horizontal.decrease.circle")
                         }
                         ForEach(tags) { tag in
                             Button {
@@ -965,8 +980,10 @@ struct ContentView: View {
                             }
                         }
                         Divider()
-                        Button("Manage Tags…") {
+                        Button {
                             showTagManager = true
+                        } label: {
+                            Label("Manage Tags…", systemImage: "tag")
                         }
                     } label: {
                         Image(systemName: "tag")
@@ -1074,16 +1091,28 @@ struct ContentView: View {
             .id(article.persistentModelID)
             .tag(article.persistentModelID)
             .contextMenu {
-                Button(article.isRead ? "Mark Unread" : "Mark Read") {
+                Button {
                     article.isRead.toggle()
+                } label: {
+                    Label(
+                        article.isRead ? "Mark Unread" : "Mark Read",
+                        systemImage: article.isRead ? "envelope.badge" : "envelope.open"
+                    )
                 }
-                Button(article.isStarred ? "Unstar" : "Star") {
+                Button {
                     article.isStarred.toggle()
+                } label: {
+                    Label(
+                        article.isStarred ? "Unstar" : "Star",
+                        systemImage: article.isStarred ? "star.slash" : "star"
+                    )
                 }
                 if article.feed?.offlinePolicy == .fullContent {
                     Divider()
-                    Button("Retry Offline Cache") {
+                    Button {
                         retryOfflineCaching(for: article)
+                    } label: {
+                        Label("Retry Offline Cache", systemImage: "arrow.clockwise.circle")
                     }
                     .disabled(
                         article.offlineStatus == .caching ||
@@ -3199,8 +3228,10 @@ private struct ArticleDetailView: View {
                         }
                     }
                     Divider()
-                    Button("Manage Tags…") {
+                    Button {
                         onOpenTagManager()
+                    } label: {
+                        Label("Manage Tags…", systemImage: "tag")
                     }
                 } label: {
                     Label("Tags", systemImage: "tag")

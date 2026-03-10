@@ -194,6 +194,28 @@ enum AppLockLockoutStore {
     }
 }
 
+enum AppLockPINLengthStore {
+    private static let key = "app_lock_pin_length"
+
+    static func readLength() -> Int? {
+        let value = UserDefaults.standard.integer(forKey: key)
+        guard (4...6).contains(value) else { return nil }
+        return value
+    }
+
+    static func saveLength(_ value: Int) {
+        guard (4...6).contains(value) else {
+            clear()
+            return
+        }
+        UserDefaults.standard.set(value, forKey: key)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
+
 struct AppLockSettingsView: View {
     @Binding var isEnabled: Bool
     @Binding var pinHash: String
@@ -207,12 +229,14 @@ struct AppLockSettingsView: View {
     @State private var confirmPIN = ""
     @State private var message: String?
     @State private var isErrorMessage = false
+    @State private var draftPINLength: Int
 
     init(isEnabled: Binding<Bool>, pinHash: Binding<String>) {
         _isEnabled = isEnabled
         _pinHash = pinHash
         _draftIsEnabled = State(initialValue: isEnabled.wrappedValue)
         _draftPINHash = State(initialValue: pinHash.wrappedValue)
+        _draftPINLength = State(initialValue: AppLockPINLengthStore.readLength() ?? 0)
     }
 
     private var hasExistingPIN: Bool {
@@ -313,6 +337,11 @@ struct AppLockSettingsView: View {
                 return
             }
             pinHash = draftPINHash
+            if draftPINHash.isEmpty {
+                AppLockPINLengthStore.clear()
+            } else {
+                AppLockPINLengthStore.saveLength(draftPINLength)
+            }
             AppLockLockoutStore.clearState()
         }
         isEnabled = draftIsEnabled
@@ -348,6 +377,7 @@ struct AppLockSettingsView: View {
             return
         }
         draftPINHash = hashedPIN
+        draftPINLength = newPIN.count
         setMessage("PIN updated. Click Done to apply.", error: false)
         currentPIN = ""
         newPIN = ""
@@ -368,6 +398,7 @@ struct AppLockScreenView: View {
     @State private var failedAttempts = 0
     @State private var lockoutUntil: Date?
     @State private var now = Date()
+    @State private var expectedPINLength: Int? = AppLockPINLengthStore.readLength()
 
     // Use a higher-frequency ticker with low tolerance so lockout countdown feels stable.
     private let lockoutTicker = Timer.publish(every: 0.2, tolerance: 0.05, on: .main, in: .common).autoconnect()
@@ -403,7 +434,12 @@ struct AppLockScreenView: View {
 
                     SecureField("Enter PIN", text: $pinInput)
                         .textContentType(.password)
-                        .onSubmit(tryUnlock)
+                        .onSubmit {
+                            tryUnlock(autoTriggered: false, countFailureOnFailure: true)
+                        }
+                        .onChange(of: pinInput) { _, newValue in
+                            handleInputChanged(newValue)
+                        }
                         .disabled(isLockedOut)
                         .padding(12)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -413,13 +449,9 @@ struct AppLockScreenView: View {
                         Text(message)
                             .monospacedDigit()
                             .font(.caption)
-                            .foregroundStyle(.red.opacity(0.95))
+                            .foregroundStyle(displayedMessageIsError ? .red.opacity(0.95) : .white.opacity(0.85))
                     }
 
-                    Button("Unlock", action: tryUnlock)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(pinInput.isEmpty || isLockedOut)
                 }
                 .padding(18)
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -437,6 +469,7 @@ struct AppLockScreenView: View {
         .onAppear {
             let persisted = AppLockLockoutStore.loadState()
             failedAttempts = persisted.failedAttempts
+            expectedPINLength = AppLockPINLengthStore.readLength()
             now = Date()
             if let persistedLockout = persisted.lockoutUntil, persistedLockout > now {
                 lockoutUntil = persistedLockout
@@ -474,15 +507,83 @@ struct AppLockScreenView: View {
         if isLockedOut {
             return "Too many attempts. Try again in \(lockoutRemainingSeconds)s."
         }
-        return errorMessage
+        if let errorMessage {
+            return errorMessage
+        }
+        return inputGuidanceMessage
     }
 
-    private func tryUnlock() {
+    private var displayedMessageIsError: Bool {
+        if isLockedOut {
+            return true
+        }
+        return errorMessage != nil
+    }
+
+    private var inputGuidanceMessage: String? {
+        if pinInput.isEmpty {
+            return "Input your PIN to unlock automatically."
+        }
+
+        guard pinInput.range(of: "^[A-Za-z0-9]*$", options: .regularExpression) != nil else {
+            return "PIN supports letters and digits only."
+        }
+
+        if let expectedPINLength {
+            if pinInput.count < expectedPINLength {
+                return "Keep typing (\(expectedPINLength - pinInput.count) more)."
+            }
+            if pinInput.count > expectedPINLength {
+                return "PIN should be \(expectedPINLength) characters."
+            }
+            return "Checking PIN…"
+        }
+
+        if pinInput.count < 4 {
+            return "PIN length is 4-6 characters."
+        }
+        if pinInput.count < 6 {
+            return "Checking as you type. Keep entering if needed."
+        }
+        return "Checking PIN…"
+    }
+
+    private func handleInputChanged(_ rawValue: String) {
         if isLockedOut {
             return
         }
 
+        let clipped = String(rawValue.prefix(6))
+        if clipped != rawValue {
+            pinInput = clipped
+            return
+        }
+
+        errorMessage = nil
+
+        guard !clipped.isEmpty else { return }
+        guard clipped.range(of: "^[A-Za-z0-9]*$", options: .regularExpression) != nil else { return }
+
+        if let expectedPINLength {
+            guard clipped.count == expectedPINLength else { return }
+            tryUnlock(autoTriggered: true, countFailureOnFailure: true)
+            return
+        }
+
+        guard clipped.count >= 4 else { return }
+        let shouldCountFailure = clipped.count >= 6
+        tryUnlock(autoTriggered: true, countFailureOnFailure: shouldCountFailure)
+    }
+
+    private func tryUnlock(autoTriggered: Bool, countFailureOnFailure: Bool) {
         guard onUnlock(pinInput) else {
+            guard countFailureOnFailure else {
+                if autoTriggered {
+                    errorMessage = "PIN not matched yet."
+                }
+                return
+            }
+
             failedAttempts += 1
             if failedAttempts >= 3 {
                 let power = min(failedAttempts - 3, 5)
@@ -496,9 +597,12 @@ struct AppLockScreenView: View {
             persistLockoutState()
             return
         }
+
         failedAttempts = 0
         lockoutUntil = nil
         errorMessage = nil
+        expectedPINLength = pinInput.count
+        AppLockPINLengthStore.saveLength(pinInput.count)
         pinInput = ""
         AppLockLockoutStore.clearState()
     }
