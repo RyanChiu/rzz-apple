@@ -167,6 +167,7 @@ struct ContentView: View {
     @AppStorage("auto_refresh_on_launch") private var autoRefreshOnLaunch = true
     @AppStorage("last_refresh_status_summary") private var lastRefreshStatusSummary = "Never refreshed"
     @AppStorage("last_refresh_status_at") private var lastRefreshStatusAt = 0.0
+    @AppStorage("article_list_column_visible") private var articleListColumnVisible = true
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
@@ -215,6 +216,20 @@ struct ContentView: View {
     private let defaultFeedFolderName = "New Added"
     private let maxTagCount = 5
     private let backupTextSummaryCharacterLimit = 20_000
+    private let backupImportMaxFileBytes = 80 * 1024 * 1024
+    private let backupImportMaxFeeds = 500
+    private let backupImportMaxArticles = 50_000
+    private let backupImportMaxTags = 200
+    private let backupImportMaxFeedTitleLength = 300
+    private let backupImportMaxFeedURLLength = 4096
+    private let backupImportMaxFolderNameLength = 120
+    private let backupImportMaxArticleTitleLength = 600
+    private let backupImportMaxArticleGUIDLength = 2048
+    private let backupImportMaxArticleLinkLength = 4096
+    private let backupImportMaxArticleSummaryLength = 1_500_000
+    private let backupImportMaxOfflineHTMLLength = 5_000_000
+    private let backupImportMaxErrorLength = 2_000
+    private let backupImportMaxTagNameLength = 80
     private let launchAutoRefreshDelayNanoseconds: UInt64 = 1_200_000_000
     private let launchAutoRefreshMinimumInterval: TimeInterval = 15 * 60
 
@@ -368,7 +383,7 @@ struct ContentView: View {
             NavigationSplitView {
                 sidebarPane
             } content: {
-                articleListPane
+                articleListColumn
             } detail: {
                 articleDetailPane
             }
@@ -376,6 +391,22 @@ struct ContentView: View {
             Divider()
             scopeStatusBar
         }
+    }
+
+    private var articleListColumn: some View {
+        articleListPane
+        .opacity(articleListColumnVisible ? 1 : 0)
+        .allowsHitTesting(articleListColumnVisible)
+        .accessibilityHidden(!articleListColumnVisible)
+        .navigationSplitViewColumnWidth(
+            min: articleListColumnVisible ? 250 : 0,
+            ideal: articleListColumnVisible ? 320 : 1,
+            max: articleListColumnVisible ? 400 : 1
+        )
+        .animation(
+            .interactiveSpring(response: 0.34, dampingFraction: 0.9, blendDuration: 0.12),
+            value: articleListColumnVisible
+        )
     }
 
     private var bodyWithToolbar: some View {
@@ -397,6 +428,21 @@ struct ContentView: View {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
                     .disabled(shouldShowLockScreen || isRefreshing || feeds.isEmpty)
+
+                    Button {
+                        guard !shouldShowLockScreen else { return }
+                        if articleListColumnVisible, selectedArticleID == nil {
+                            selectedArticleID = displayedArticles.first?.persistentModelID
+                        }
+                        articleListColumnVisible.toggle()
+                    } label: {
+                        Label(
+                            articleListColumnVisible ? "Hide Articles List" : "Show Articles List",
+                            systemImage: articleListColumnVisible ? "rectangle.split.2x1" : "rectangle.split.2x1.fill"
+                        )
+                    }
+                    .help(articleListColumnVisible ? "Hide middle article list column" : "Show middle article list column")
+                    .disabled(shouldShowLockScreen)
 
                     if let selectedFeedForEditing {
                         Button {
@@ -753,11 +799,13 @@ struct ContentView: View {
             .onChange(of: appLockEnabled) { _, newValue in
                 if !newValue {
                     isAppLocked = false
+                    AppLockLockoutStore.clearState()
                 }
             }
             .onChange(of: appLockPINHash) { _, newValue in
                 if newValue.isEmpty {
                     isAppLocked = false
+                    AppLockLockoutStore.clearState()
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: appWillResignActiveNotification)) { _ in
@@ -771,7 +819,12 @@ struct ContentView: View {
     }
 
     private func unlockIfValid(_ pin: String) -> Bool {
-        guard AppLockSecurity.verifyPIN(pin, storedHash: appLockPINHash) else { return false }
+        let verification = AppLockSecurity.verifyPINWithUpgrade(pin, storedHash: appLockPINHash)
+        guard verification.isValid else { return false }
+        if let upgradedHash = verification.upgradedHash, upgradedHash != appLockPINHash,
+           AppLockCredentialStore.savePINHash(upgradedHash) {
+            appLockPINHash = upgradedHash
+        }
         isAppLocked = false
         return true
     }
@@ -2531,6 +2584,7 @@ struct ContentView: View {
         do {
             let data = try loadBackupData(from: url)
             let package = try RZZBackupCodec.decode(data)
+            try validateBackupPackage(package)
             try importBackupPackage(package)
 
             let importedFeedCount = package.feeds.count
@@ -2549,7 +2603,129 @@ struct ContentView: View {
                 url.stopAccessingSecurityScopedResource()
             }
         }
-        return try Data(contentsOf: url)
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        if let fileSize = values.fileSize, fileSize > backupImportMaxFileBytes {
+            throw backupValidationError("Backup file is too large (\(fileSize) bytes). Max supported size is \(backupImportMaxFileBytes) bytes.")
+        }
+        return try Data(contentsOf: url, options: [.mappedIfSafe])
+    }
+
+    private func validateBackupPackage(_ package: RZZBackupPackage) throws {
+        guard package.version == RZZBackupPackage.currentVersion else {
+            throw backupValidationError("Unsupported backup version \(package.version).")
+        }
+
+        guard package.feeds.count <= backupImportMaxFeeds else {
+            throw backupValidationError("Backup contains too many feeds (\(package.feeds.count)). Max is \(backupImportMaxFeeds).")
+        }
+        guard package.tags.count <= backupImportMaxTags else {
+            throw backupValidationError("Backup contains too many tags (\(package.tags.count)). Max is \(backupImportMaxTags).")
+        }
+
+        var seenTagIDs: Set<UUID> = []
+        for tag in package.tags {
+            guard seenTagIDs.insert(tag.id).inserted else {
+                throw backupValidationError("Backup has duplicate tag IDs.")
+            }
+            try validateStringLength(tag.name, max: backupImportMaxTagNameLength, field: "Tag name")
+        }
+
+        var seenFeedIDs: Set<UUID> = []
+        var seenFeedURLs: Set<String> = []
+        var seenArticleIDs: Set<UUID> = []
+        var totalArticleCount = 0
+
+        for feed in package.feeds {
+            guard seenFeedIDs.insert(feed.id).inserted else {
+                throw backupValidationError("Backup has duplicate feed IDs.")
+            }
+
+            let normalizedURL = feed.urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let parsedFeedURL = URL(string: normalizedURL), parsedFeedURL.scheme?.hasPrefix("http") == true else {
+                throw backupValidationError("Backup contains an invalid feed URL: \(feed.urlString)")
+            }
+            try validateStringLength(feed.title, max: backupImportMaxFeedTitleLength, field: "Feed title")
+            try validateStringLength(normalizedURL, max: backupImportMaxFeedURLLength, field: "Feed URL")
+            try validateStringLength(feed.folderName, max: backupImportMaxFolderNameLength, field: "Folder name")
+            try validateStringLength(feed.proxyHost, max: 255, field: "Proxy host")
+            try validateStringLength(feed.proxyUsername, max: 255, field: "Proxy username")
+
+            guard FeedOfflinePolicy(rawValue: feed.offlinePolicyRaw) != nil else {
+                throw backupValidationError("Backup contains an invalid offline policy for feed \(feed.title).")
+            }
+            guard FeedProxyType(rawValue: feed.proxyTypeRaw) != nil else {
+                throw backupValidationError("Backup contains an invalid proxy type for feed \(feed.title).")
+            }
+            if feed.useProxy || feed.useProxyForContent {
+                guard !feed.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw backupValidationError("Proxy host is missing for feed \(feed.title).")
+                }
+                guard let proxyPort = feed.proxyPort, (1...65535).contains(proxyPort) else {
+                    throw backupValidationError("Proxy port is invalid for feed \(feed.title).")
+                }
+                _ = proxyPort
+            } else if let proxyPort = feed.proxyPort {
+                guard (1...65535).contains(proxyPort) else {
+                    throw backupValidationError("Proxy port is invalid for feed \(feed.title).")
+                }
+            }
+
+            let dedupeURL = normalizedURL.lowercased()
+            guard seenFeedURLs.insert(dedupeURL).inserted else {
+                throw backupValidationError("Backup contains duplicate feed URLs.")
+            }
+
+            totalArticleCount += feed.articles.count
+            guard totalArticleCount <= backupImportMaxArticles else {
+                throw backupValidationError("Backup contains too many articles (\(totalArticleCount)). Max is \(backupImportMaxArticles).")
+            }
+
+            for article in feed.articles {
+                guard seenArticleIDs.insert(article.id).inserted else {
+                    throw backupValidationError("Backup has duplicate article IDs.")
+                }
+                guard ArticleOfflineStatus(rawValue: article.offlineStatusRaw) != nil else {
+                    throw backupValidationError("Backup contains an invalid offline status for article \(article.title).")
+                }
+                guard article.readingScrollProgress.isFinite else {
+                    throw backupValidationError("Backup contains invalid reading progress data.")
+                }
+                try validateStringLength(article.guid, max: backupImportMaxArticleGUIDLength, field: "Article GUID")
+                try validateStringLength(article.title, max: backupImportMaxArticleTitleLength, field: "Article title")
+                try validateStringLength(article.link, max: backupImportMaxArticleLinkLength, field: "Article link")
+                try validateStringLength(article.summary, max: backupImportMaxArticleSummaryLength, field: "Article summary")
+                try validateStringLength(article.offlineCachedHTML, max: backupImportMaxOfflineHTMLLength, field: "Offline HTML")
+                try validateStringLength(article.offlineLastError, max: backupImportMaxErrorLength, field: "Offline error")
+
+                let trimmedLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedLink.isEmpty {
+                    guard let parsedLink = URL(string: trimmedLink), parsedLink.scheme?.hasPrefix("http") == true else {
+                        throw backupValidationError("Backup contains an invalid article URL: \(article.link)")
+                    }
+                }
+
+                guard article.offlineCachedBytes >= 0 else {
+                    throw backupValidationError("Backup contains invalid offline size metadata.")
+                }
+                if article.tagIDs.count > backupImportMaxTags {
+                    throw backupValidationError("Backup contains too many tags on a single article.")
+                }
+            }
+        }
+    }
+
+    private func validateStringLength(_ value: String, max: Int, field: String) throws {
+        guard value.utf8.count <= max else {
+            throw backupValidationError("\(field) is too long. Max supported size is \(max) bytes.")
+        }
+    }
+
+    private func backupValidationError(_ message: String) -> NSError {
+        NSError(
+            domain: "RZZBackupValidation",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
     }
 
     @MainActor
@@ -3867,6 +4043,29 @@ private struct HTMLWebView: NSViewRepresentable {
             onLoadingStateChange(false)
         }
 
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            let shouldHandleExternally = navigationAction.navigationType == .linkActivated || navigationAction.targetFrame == nil
+            guard shouldHandleExternally else {
+                decisionHandler(.allow)
+                return
+            }
+
+            guard let url = navigationAction.request.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https"
+            else {
+                decisionHandler(.cancel)
+                return
+            }
+
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             onLoadingStateChange(false)
         }
@@ -3979,6 +4178,29 @@ private struct HTMLWebView: UIViewRepresentable {
                 webView.evaluateJavaScript(js, completionHandler: nil)
             }
             onLoadingStateChange(false)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            let shouldHandleExternally = navigationAction.navigationType == .linkActivated || navigationAction.targetFrame == nil
+            guard shouldHandleExternally else {
+                decisionHandler(.allow)
+                return
+            }
+
+            guard let url = navigationAction.request.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https"
+            else {
+                decisionHandler(.cancel)
+                return
+            }
+
+            UIApplication.shared.open(url)
+            decisionHandler(.cancel)
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
