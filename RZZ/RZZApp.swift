@@ -7,30 +7,13 @@ struct RZZApp: App {
     @AppStorage("app_lock_enabled") private var appLockEnabled = false
     @AppStorage("app_lock_pin_hash") private var legacyAppLockPINHash = ""
 
+    private let dataStoreBootstrap = DataStoreBootstrap.bootstrap()
+
     @State private var appLockPINHash = ""
     @State private var isAppLocked = false
     @State private var shouldLockOnNextActive = false
     @State private var isPrivacyShieldVisible = false
-
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Feed.self,
-            Article.self,
-            Tag.self,
-        ])
-
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-            if let container = try? ModelContainer(for: schema, configurations: [fallback]) {
-                return container
-            }
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
+    @State private var hasShownDataStoreWarning = false
 
     var body: some Scene {
         WindowGroup {
@@ -49,8 +32,26 @@ struct RZZApp: App {
                         .transition(.opacity)
                 }
             }
+            .onAppear {
+                guard !hasShownDataStoreWarning else { return }
+                hasShownDataStoreWarning = true
+                if let warning = dataStoreBootstrap.warningMessage, !warning.isEmpty {
+                    transferMessage = warning
+                }
+            }
+            .alert("Storage Warning", isPresented: Binding(get: {
+                transferMessage != nil
+            }, set: { presented in
+                if !presented {
+                    transferMessage = nil
+                }
+            })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(transferMessage ?? "")
+            }
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(dataStoreBootstrap.container)
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .inactive, .background:
@@ -76,6 +77,8 @@ struct RZZApp: App {
         }
     }
 
+    @State private var transferMessage: String?
+
     private func bootstrapAppLockPINHash() {
         let migration = AppLockCredentialStore.migrateLegacyPINHashIfNeeded(legacyPINHash: &legacyAppLockPINHash)
         switch migration {
@@ -91,6 +94,35 @@ struct RZZApp: App {
                 isAppLocked = false
                 shouldLockOnNextActive = false
             }
+        }
+    }
+}
+
+private struct DataStoreBootstrap {
+    let container: ModelContainer
+    let warningMessage: String?
+
+    static func bootstrap() -> DataStoreBootstrap {
+        let schema = Schema([
+            Feed.self,
+            Article.self,
+            Tag.self,
+        ])
+
+        let persistent = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        do {
+            let container = try ModelContainer(for: schema, configurations: [persistent])
+            return DataStoreBootstrap(container: container, warningMessage: nil)
+        } catch {
+            let fallback = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            if let container = try? ModelContainer(for: schema, configurations: [fallback]) {
+                let warning = """
+                RZZ could not open the local data store and started in temporary memory-only mode. \
+                Your changes may not persist after app restart. Error: \(error.localizedDescription)
+                """
+                return DataStoreBootstrap(container: container, warningMessage: warning)
+            }
+            fatalError("Could not create ModelContainer: \(error)")
         }
     }
 }
