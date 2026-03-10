@@ -10,6 +10,7 @@ struct RZZApp: App {
     @State private var appLockPINHash = ""
     @State private var isAppLocked = false
     @State private var shouldLockOnNextActive = false
+    @State private var isPrivacyShieldVisible = false
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
@@ -33,26 +34,36 @@ struct RZZApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(
-                isAppLocked: $isAppLocked,
-                appLockPINHash: $appLockPINHash
-            )
-            .task {
-                bootstrapAppLockPINHash()
+            ZStack {
+                ContentView(
+                    isAppLocked: $isAppLocked,
+                    appLockPINHash: $appLockPINHash
+                )
+                .privacySensitive()
+                .task {
+                    bootstrapAppLockPINHash()
+                }
+
+                if isPrivacyShieldVisible {
+                    AppPrivacyShieldView()
+                        .transition(.opacity)
+                }
             }
         }
         .modelContainer(sharedModelContainer)
         .onChange(of: scenePhase) { _, newPhase in
-            guard appLockEnabled, !appLockPINHash.isEmpty else { return }
-
             switch newPhase {
             case .inactive, .background:
-                shouldLockOnNextActive = true
+                isPrivacyShieldVisible = true
+                if appLockEnabled, !appLockPINHash.isEmpty {
+                    shouldLockOnNextActive = true
+                }
             case .active:
-                if shouldLockOnNextActive {
+                if appLockEnabled, !appLockPINHash.isEmpty, shouldLockOnNextActive {
                     isAppLocked = true
                 }
                 shouldLockOnNextActive = false
+                isPrivacyShieldVisible = false
             @unknown default:
                 break
             }
@@ -81,5 +92,30 @@ struct RZZApp: App {
                 shouldLockOnNextActive = false
             }
         }
+    }
+}
+
+private struct AppPrivacyShieldView: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.05, green: 0.18, blue: 0.30), Color(red: 0.05, green: 0.30, blue: 0.42)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 8) {
+                Text("RZZ")
+                    .font(.system(size: 44, weight: .black, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.95))
+                Text("Protected")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+            .padding(18)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        }
+        .allowsHitTesting(true)
     }
 }

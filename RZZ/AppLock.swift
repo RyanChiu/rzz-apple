@@ -1,6 +1,8 @@
 import SwiftUI
 import CryptoKit
 import Combine
+import CommonCrypto
+import Security
 
 enum AppLockPINMigrationResult {
     case notNeeded
@@ -44,19 +46,151 @@ enum AppLockCredentialStore {
 
 enum AppLockSecurity {
     private static let pattern = "^[A-Za-z0-9]{4,6}$"
+    private static let legacyPrefix = "v1:"
+    private static let pbkdf2Prefix = "v2"
+    private static let pbkdf2Rounds = 200_000
+    private static let pbkdf2SaltByteCount = 16
+    private static let pbkdf2KeyByteCount = 32
 
     static func isValidPIN(_ pin: String) -> Bool {
         pin.range(of: pattern, options: .regularExpression) != nil
     }
 
-    static func hashPIN(_ pin: String) -> String {
-        let digest = SHA256.hash(data: Data(pin.utf8))
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        return "v1:\(hex)"
+    static func hashPIN(_ pin: String) -> String? {
+        makePBKDF2Hash(pin, rounds: pbkdf2Rounds)
+    }
+
+    static func verifyPINWithUpgrade(_ pin: String, storedHash: String) -> (isValid: Bool, upgradedHash: String?) {
+        let normalizedStoredHash = storedHash.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedStoredHash.isEmpty else { return (false, nil) }
+
+        if normalizedStoredHash.hasPrefix(legacyPrefix) {
+            let valid = hashLegacyPIN(pin) == normalizedStoredHash
+            let upgradedHash = valid ? makePBKDF2Hash(pin, rounds: pbkdf2Rounds) : nil
+            return (valid, upgradedHash)
+        }
+
+        guard let parsed = parsePBKDF2Hash(normalizedStoredHash),
+              let derivedKey = derivePBKDF2Key(pin: pin, salt: parsed.salt, rounds: parsed.rounds, keyByteCount: parsed.key.count)
+        else {
+            return (false, nil)
+        }
+
+        let valid = constantTimeEquals(derivedKey, parsed.key)
+        guard valid else { return (false, nil) }
+
+        let needsUpgrade = parsed.rounds < pbkdf2Rounds
+        let upgradedHash = needsUpgrade ? makePBKDF2Hash(pin, rounds: pbkdf2Rounds) : nil
+        return (true, upgradedHash)
     }
 
     static func verifyPIN(_ pin: String, storedHash: String) -> Bool {
-        hashPIN(pin) == storedHash
+        verifyPINWithUpgrade(pin, storedHash: storedHash).isValid
+    }
+
+    private static func hashLegacyPIN(_ pin: String) -> String {
+        let digest = SHA256.hash(data: Data(pin.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(legacyPrefix)\(hex)"
+    }
+
+    private static func makePBKDF2Hash(_ pin: String, rounds: Int) -> String? {
+        guard let salt = makeRandomSalt(byteCount: pbkdf2SaltByteCount),
+              let key = derivePBKDF2Key(pin: pin, salt: salt, rounds: rounds, keyByteCount: pbkdf2KeyByteCount)
+        else {
+            return nil
+        }
+
+        return "\(pbkdf2Prefix)$\(rounds)$\(salt.base64EncodedString())$\(key.base64EncodedString())"
+    }
+
+    private static func parsePBKDF2Hash(_ hash: String) -> (rounds: Int, salt: Data, key: Data)? {
+        let parts = hash.split(separator: "$", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              String(parts[0]) == pbkdf2Prefix,
+              let rounds = Int(parts[1]),
+              rounds > 0,
+              rounds <= 1_000_000,
+              let salt = Data(base64Encoded: String(parts[2])),
+              let key = Data(base64Encoded: String(parts[3])),
+              !salt.isEmpty,
+              !key.isEmpty
+        else {
+            return nil
+        }
+        return (rounds, salt, key)
+    }
+
+    private static func derivePBKDF2Key(pin: String, salt: Data, rounds: Int, keyByteCount: Int) -> Data? {
+        guard let passwordData = pin.data(using: .utf8), !passwordData.isEmpty else { return nil }
+        var keyData = Data(count: keyByteCount)
+        let status: Int32 = keyData.withUnsafeMutableBytes { keyBytes in
+            salt.withUnsafeBytes { saltBytes in
+                passwordData.withUnsafeBytes { passwordBytes in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordBytes.bindMemory(to: Int8.self).baseAddress,
+                        passwordData.count,
+                        saltBytes.bindMemory(to: UInt8.self).baseAddress,
+                        salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                        UInt32(rounds),
+                        keyBytes.bindMemory(to: UInt8.self).baseAddress,
+                        keyByteCount
+                    )
+                }
+            }
+        }
+        guard status == kCCSuccess else { return nil }
+        return keyData
+    }
+
+    private static func makeRandomSalt(byteCount: Int) -> Data? {
+        var data = Data(count: byteCount)
+        let status = data.withUnsafeMutableBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, byteCount, baseAddress)
+        }
+        guard status == errSecSuccess else { return nil }
+        return data
+    }
+
+    private static func constantTimeEquals(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        var diff: UInt8 = 0
+        for index in lhs.indices {
+            diff |= lhs[index] ^ rhs[index]
+        }
+        return diff == 0
+    }
+}
+
+enum AppLockLockoutStore {
+    private static let failedAttemptsKey = "app_lock_failed_attempts"
+    private static let lockoutUntilEpochKey = "app_lock_lockout_until_epoch"
+
+    static func loadState() -> (failedAttempts: Int, lockoutUntil: Date?) {
+        let defaults = UserDefaults.standard
+        let attempts = max(defaults.integer(forKey: failedAttemptsKey), 0)
+        let epoch = defaults.double(forKey: lockoutUntilEpochKey)
+        let lockoutDate = epoch > 0 ? Date(timeIntervalSince1970: epoch) : nil
+        return (attempts, lockoutDate)
+    }
+
+    static func saveState(failedAttempts: Int, lockoutUntil: Date?) {
+        let defaults = UserDefaults.standard
+        defaults.set(max(failedAttempts, 0), forKey: failedAttemptsKey)
+        if let lockoutUntil {
+            defaults.set(lockoutUntil.timeIntervalSince1970, forKey: lockoutUntilEpochKey)
+        } else {
+            defaults.removeObject(forKey: lockoutUntilEpochKey)
+        }
+    }
+
+    static func clearState() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: failedAttemptsKey)
+        defaults.removeObject(forKey: lockoutUntilEpochKey)
     }
 }
 
@@ -179,8 +313,12 @@ struct AppLockSettingsView: View {
                 return
             }
             pinHash = draftPINHash
+            AppLockLockoutStore.clearState()
         }
         isEnabled = draftIsEnabled
+        if !draftIsEnabled {
+            AppLockLockoutStore.clearState()
+        }
         dismiss()
     }
 
@@ -205,7 +343,11 @@ struct AppLockSettingsView: View {
             return
         }
 
-        draftPINHash = AppLockSecurity.hashPIN(newPIN)
+        guard let hashedPIN = AppLockSecurity.hashPIN(newPIN) else {
+            setMessage("Could not generate a secure PIN hash. Please try again.", error: true)
+            return
+        }
+        draftPINHash = hashedPIN
         setMessage("PIN updated. Click Done to apply.", error: false)
         currentPIN = ""
         newPIN = ""
@@ -289,6 +431,18 @@ struct AppLockScreenView: View {
             now = tick
             if let lockoutUntil, tick >= lockoutUntil {
                 self.lockoutUntil = nil
+                persistLockoutState()
+            }
+        }
+        .onAppear {
+            let persisted = AppLockLockoutStore.loadState()
+            failedAttempts = persisted.failedAttempts
+            now = Date()
+            if let persistedLockout = persisted.lockoutUntil, persistedLockout > now {
+                lockoutUntil = persistedLockout
+            } else {
+                lockoutUntil = nil
+                persistLockoutState()
             }
         }
     }
@@ -339,16 +493,22 @@ struct AppLockScreenView: View {
             } else {
                 errorMessage = "Invalid PIN."
             }
+            persistLockoutState()
             return
         }
         failedAttempts = 0
         lockoutUntil = nil
         errorMessage = nil
         pinInput = ""
+        AppLockLockoutStore.clearState()
     }
 
     private var lockoutRemainingSeconds: Int {
         guard let lockoutUntil else { return 0 }
         return max(1, Int(ceil(lockoutUntil.timeIntervalSince(now))))
+    }
+
+    private func persistLockoutState() {
+        AppLockLockoutStore.saveState(failedAttempts: failedAttempts, lockoutUntil: lockoutUntil)
     }
 }

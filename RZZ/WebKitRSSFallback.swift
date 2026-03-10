@@ -4,6 +4,9 @@ import WebKit
 @MainActor
 enum WebKitRSSFallback {
     static func fetchData(from url: URL, timeout: TimeInterval = 30) async throws -> Data {
+        guard isAllowedWebURL(url) else {
+            throw URLError(.unsupportedURL)
+        }
         let loader = XMLPageLoader(url: url, timeout: timeout)
         let xml = try await loader.load()
         guard let data = xml.data(using: .utf8), !data.isEmpty else {
@@ -13,12 +16,20 @@ enum WebKitRSSFallback {
     }
 
     static func fetchHTML(from url: URL, timeout: TimeInterval = 30) async throws -> String {
+        guard isAllowedWebURL(url) else {
+            throw URLError(.unsupportedURL)
+        }
         let loader = HTMLPageLoader(url: url, timeout: timeout)
         let html = try await loader.load()
         guard !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RSSServiceError.invalidData
         }
         return html
+    }
+
+    private static func isAllowedWebURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
     }
 }
 
