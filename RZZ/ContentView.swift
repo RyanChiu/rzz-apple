@@ -3594,7 +3594,7 @@ private struct ArticleDetailView: View {
                     ZStack(alignment: .topLeading) {
                         ArticleHTMLView(
                             htmlBody: bodyHTML,
-                            sourceURL: URL(string: article.link),
+                            sourceURL: parseSupportedWebURL(article.link),
                             initialScrollProgress: article.readingScrollProgress,
                             onScrollProgressChange: persistReadingProgress
                         )
@@ -4281,7 +4281,7 @@ private struct HTMLWebView: NSViewRepresentable {
         let config = WKWebViewConfiguration()
         config.userContentController = context.coordinator.makeUserContentController()
         let view = WKWebView(frame: .zero, configuration: config)
-        view.setValue(false, forKey: "drawsBackground")
+        view.underPageBackgroundColor = .clear
         view.navigationDelegate = context.coordinator
         return view
     }
@@ -4419,6 +4419,7 @@ private struct HTMLWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.userContentController = context.coordinator.makeUserContentController()
         let view = WKWebView(frame: .zero, configuration: config)
+        view.underPageBackgroundColor = .clear
         view.navigationDelegate = context.coordinator
         return view
     }

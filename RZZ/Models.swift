@@ -95,7 +95,7 @@ final class Feed {
     }
 
     var url: URL? {
-        URL(string: urlString)
+        parseSupportedWebURL(urlString)
     }
 
     var proxyType: FeedProxyType {
@@ -184,6 +184,14 @@ final class Feed {
     private var proxyPasswordAccount: String {
         "feed-proxy-password.\(id.uuidString.lowercased())"
     }
+}
+
+private func parseSupportedWebURL(_ raw: String) -> URL? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, let url = URL(string: trimmed) else { return nil }
+    guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+    guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else { return nil }
+    return url
 }
 
 @Model
