@@ -907,7 +907,7 @@ struct ContentView: View {
                                             Label("Edit", systemImage: "pencil")
                                         }
                                         Button {
-                                            Task { _ = await refreshSingleFeed(feed) }
+                                            Task { await refreshSingleFeedWithStatus(feed) }
                                         } label: {
                                             Label("Refresh", systemImage: "arrow.clockwise")
                                         }
@@ -1844,7 +1844,7 @@ struct ContentView: View {
         var details: [FeedRefreshDetail] = []
 
         for (index, feed) in orderedFeeds.enumerated() {
-            let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false, reportErrors: false)
+            let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false)
             details.append(makeRefreshDetail(feed: feed, outcome: outcome))
             switch outcome {
             case .success(let newCount):
@@ -1887,6 +1887,33 @@ struct ContentView: View {
         let selectedIDSet = Set(selected.map(\.persistentModelID))
         let rest = feeds.filter { !selectedIDSet.contains($0.persistentModelID) }
         return selected + rest
+    }
+
+    @MainActor
+    private func refreshSingleFeedWithStatus(_ feed: Feed) async {
+        let outcome = await refreshSingleFeed(feed)
+        let detail = makeRefreshDetail(feed: feed, outcome: outcome)
+        recordRefreshDetails(title: "Manual Refresh", details: [detail])
+        switch outcome {
+        case .success(let newCount):
+            recordRefreshSummary(
+                buildRefreshSummary(
+                    prefix: "Manual refresh",
+                    totalNew: newCount,
+                    failedCount: 0,
+                    feedCount: 1
+                )
+            )
+        case .failure:
+            recordRefreshSummary(
+                buildRefreshSummary(
+                    prefix: "Manual refresh",
+                    totalNew: 0,
+                    failedCount: 1,
+                    feedCount: 1
+                )
+            )
+        }
     }
 
     @MainActor
@@ -1981,14 +2008,10 @@ struct ContentView: View {
     @MainActor
     private func refreshSingleFeed(
         _ feed: Feed,
-        showGlobalSpinner: Bool = true,
-        reportErrors: Bool = true
+        showGlobalSpinner: Bool = true
     ) async -> FeedRefreshOutcome {
         guard let url = feed.url else {
             let message = "Invalid URL for feed: \(feed.title)"
-            if reportErrors {
-                refreshError = message
-            }
             return .failure(message: message)
         }
 
@@ -2061,16 +2084,49 @@ struct ContentView: View {
             return .success(newArticleCount: newArticles.count)
         } catch {
             let message = refreshFailureMessage(for: error, url: url)
-            if reportErrors {
-                refreshError = message
-            }
             return .failure(message: message)
         }
     }
 
     private func refreshFailureMessage(for error: Error, url: URL) -> String {
-        if let urlError = error as? URLError, urlError.code == .cannotFindHost {
-            return "DNS could not resolve host '\(url.host ?? "unknown")' (\(urlError.code.rawValue)). Try enabling proxy for this feed or check your network DNS settings."
+        if let serviceError = error as? RSSServiceError {
+            switch serviceError {
+            case .networkResolutionFailed(let host, _, _, _):
+                return "Cannot resolve host '\(host)'. Check DNS or try proxy for this feed."
+            case .httpStatus(let code):
+                return "Source returned HTTP \(code)."
+            case .parseFailed:
+                return "Received data, but could not parse it as a valid RSS feed."
+            case .invalidData:
+                return "Source returned invalid or empty feed data."
+            case .badResponse:
+                return "Source did not return a valid response."
+            }
+        }
+
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cannotFindHost:
+                return "Cannot resolve host '\(url.host ?? "unknown")'. Check DNS or try proxy for this feed."
+            case .cannotConnectToHost:
+                return "Cannot connect to this source right now."
+            case .timedOut:
+                return "Request timed out. The source may be slow or temporarily unavailable."
+            case .notConnectedToInternet:
+                return "No internet connection is available."
+            case .networkConnectionLost:
+                return "Network connection was interrupted."
+            case .appTransportSecurityRequiresSecureConnection:
+                return "This source only supports insecure HTTP and was blocked by system security policy."
+            case .secureConnectionFailed,
+                 .serverCertificateHasBadDate,
+                 .serverCertificateUntrusted,
+                 .serverCertificateHasUnknownRoot,
+                 .serverCertificateNotYetValid:
+                return "Secure connection to this source failed."
+            default:
+                return urlError.localizedDescription
+            }
         }
         return error.localizedDescription
     }
