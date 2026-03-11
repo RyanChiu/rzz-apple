@@ -40,6 +40,9 @@ enum RSSService {
     private static let articleRequestTimeout: TimeInterval = 45
 
     static func fetchFeed(from url: URL, proxy: FeedProxyConfiguration? = nil) async throws -> ParsedFeed {
+        guard isSupportedWebURL(url) else {
+            throw RSSServiceError.invalidData
+        }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.setValue(
@@ -117,6 +120,9 @@ enum RSSService {
         proxy: FeedProxyConfiguration? = nil,
         allowInsecureHTTPInWebContent: Bool = false
     ) async throws -> String {
+        guard isSupportedWebURL(url) else {
+            throw URLError(.unsupportedURL)
+        }
         do {
             return try await fetchArticleHTMLAttempt(from: url, proxy: proxy)
         } catch {
@@ -142,6 +148,9 @@ enum RSSService {
     }
 
     private static func fetchArticleHTMLAttempt(from url: URL, proxy: FeedProxyConfiguration?) async throws -> String {
+        guard isSupportedWebURL(url) else {
+            throw URLError(.unsupportedURL)
+        }
         let request = makeArticleRequest(url: url)
         do {
             let (data, response) = try await dataAndResponse(for: request, proxy: proxy, bypassSystemProxy: false)
@@ -235,6 +244,10 @@ enum RSSService {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 30
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        config.httpCookieStorage = nil
 
         if bypassSystemProxy {
             config.connectionProxyDictionary = [
@@ -274,6 +287,18 @@ enum RSSService {
 
         config.connectionProxyDictionary = dictionary
         return URLSession(configuration: config)
+    }
+
+    private static func isSupportedWebURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return false
+        }
+        guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !host.isEmpty else {
+            return false
+        }
+        return true
     }
 }
 

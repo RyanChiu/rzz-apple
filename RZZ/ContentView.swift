@@ -72,6 +72,7 @@ private struct FeedRefreshDetail: Identifiable {
     let id = UUID()
     let feedID: PersistentIdentifier?
     let feedTitle: String
+    let sourceURL: String?
     let status: FeedRefreshDetailStatus
     let detail: String
 
@@ -152,7 +153,7 @@ struct ContentView: View {
     @Binding var isAppLocked: Bool
     @Binding var appLockPINHash: String
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: [SortDescriptor(\Feed.createdAt, order: .reverse)]) private var feeds: [Feed]
+    @Query(sort: [SortDescriptor(\Feed.createdAt, order: .forward)]) private var feeds: [Feed]
     @Query(sort: [SortDescriptor(\Article.publishedAt, order: .reverse), SortDescriptor(\Article.createdAt, order: .reverse)]) private var articles: [Article]
     @Query(sort: [SortDescriptor(\Tag.name, order: .forward), SortDescriptor(\Tag.createdAt, order: .forward)]) private var tags: [Tag]
     @AppStorage("app_lock_enabled") private var appLockEnabled = false
@@ -203,6 +204,11 @@ struct ContentView: View {
     @State private var lastRefreshDetailTitle = "Latest Refresh"
     @State private var lastRefreshDetails: [FeedRefreshDetail] = []
     @State private var lastRefreshDetailsAt: TimeInterval = 0
+    @State private var showAddFeedDetails = false
+    @State private var lastAddFeedStatusSummary: String?
+    @State private var lastAddFeedStatusStyle: LaunchRefreshStatusStyle = .info
+    @State private var lastAddFeedStatusAt: TimeInterval = 0
+    @State private var lastAddFeedDetails: [FeedRefreshDetail] = []
     @State private var didScheduleLaunchAutoRefresh = false
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
@@ -698,6 +704,17 @@ struct ContentView: View {
                 .presentationSizing(.fitted)
                 #endif
             }
+            .sheet(isPresented: $showAddFeedDetails) {
+                RefreshDetailsView(
+                    title: "Add Feed",
+                    timestamp: lastAddFeedStatusAt > 0 ? Date(timeIntervalSince1970: lastAddFeedStatusAt) : nil,
+                    details: lastAddFeedDetails,
+                    onRetryFailedOnly: nil
+                )
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
             .confirmationDialog(
                 "Import Backup and Replace Current Data?",
                 isPresented: $showImportBackupConfirmation,
@@ -1151,6 +1168,15 @@ struct ContentView: View {
         return "\(lastRefreshStatusSummary) · \(formatter.string(from: date))"
     }
 
+    private var persistentAddFeedStatusText: String {
+        guard let lastAddFeedStatusSummary else { return "" }
+        guard lastAddFeedStatusAt > 0 else { return lastAddFeedStatusSummary }
+        let date = Date(timeIntervalSince1970: lastAddFeedStatusAt)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return "\(lastAddFeedStatusSummary) · \(formatter.string(from: date))"
+    }
+
     private var scopeStatusBar: some View {
         HStack(spacing: 10) {
             Image(systemName: hasCustomFeedSelection ? "line.3.horizontal.decrease.circle.fill" : "tray.full.fill")
@@ -1185,6 +1211,27 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .disabled(lastRefreshDetails.isEmpty)
             .help(lastRefreshDetails.isEmpty ? "No refresh details yet" : "Show refresh details")
+
+            if let lastAddFeedStatusSummary {
+                Divider()
+                    .frame(height: 14)
+                Button {
+                    showAddFeedDetails = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: addFeedStatusIconName)
+                            .font(.caption2)
+                        Text(persistentAddFeedStatusText)
+                            .font(.caption2)
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(addFeedStatusColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(lastAddFeedDetails.isEmpty)
+                .help("Show add feed details")
+                .accessibilityLabel(lastAddFeedStatusSummary)
+            }
 
             if let stats = activeFeedStats {
                 Divider()
@@ -1282,6 +1329,28 @@ struct ContentView: View {
             return "checkmark.circle"
         case .failure:
             return "exclamationmark.triangle"
+        }
+    }
+
+    private var addFeedStatusColor: Color {
+        switch lastAddFeedStatusStyle {
+        case .info:
+            return .secondary
+        case .success:
+            return .green
+        case .failure:
+            return .red
+        }
+    }
+
+    private var addFeedStatusIconName: String {
+        switch lastAddFeedStatusStyle {
+        case .info:
+            return "plus.circle"
+        case .success:
+            return "checkmark.circle.fill"
+        case .failure:
+            return "xmark.octagon.fill"
         }
     }
 
@@ -1478,19 +1547,72 @@ struct ContentView: View {
     @MainActor
     private func addFeed(values: FeedFormValues) async {
         let trimmedURL = values.urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmedURL), url.scheme?.hasPrefix("http") == true else {
-            refreshError = "Please input a valid http(s) feed URL."
+        guard let url = parseSupportedWebURL(trimmedURL) else {
+            recordAddFeedStatus(
+                summary: "Add feed failed",
+                style: .failure,
+                detail: FeedRefreshDetail(
+                    feedID: nil,
+                    feedTitle: "Invalid URL",
+                    sourceURL: trimmedURL,
+                    status: .failure,
+                    detail: "Please input a valid http(s) feed URL."
+                )
+            )
             return
         }
 
         if feeds.contains(where: { $0.urlString.caseInsensitiveCompare(trimmedURL) == .orderedSame }) {
-            refreshError = "This feed is already added."
+            recordAddFeedStatus(
+                summary: "Add feed skipped",
+                style: .info,
+                detail: FeedRefreshDetail(
+                    feedID: nil,
+                    feedTitle: url.host ?? trimmedURL,
+                    sourceURL: trimmedURL,
+                    status: .failure,
+                    detail: "This feed is already added."
+                )
+            )
             return
         }
-        guard validateProxyValues(values) else { return }
+        if let proxyValidationError = validateProxyValues(values) {
+            recordAddFeedStatus(
+                summary: "Add feed failed",
+                style: .failure,
+                detail: FeedRefreshDetail(
+                    feedID: nil,
+                    feedTitle: url.host ?? trimmedURL,
+                    sourceURL: trimmedURL,
+                    status: .failure,
+                    detail: proxyValidationError
+                )
+            )
+            return
+        }
 
         let trimmedTitle = values.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayTitle = trimmedTitle.isEmpty ? (url.host ?? trimmedURL) : trimmedTitle
+
+        let fetchProxy = feedFetchProxyConfiguration(from: values)
+        let parsedFeed: ParsedFeed
+        do {
+            parsedFeed = try await RSSService.fetchFeed(from: url, proxy: fetchProxy)
+        } catch {
+            let message = addFeedFailureMessage(for: error, url: url)
+            recordAddFeedStatus(
+                summary: "Add feed failed",
+                style: .failure,
+                detail: FeedRefreshDetail(
+                    feedID: nil,
+                    feedTitle: displayTitle,
+                    sourceURL: trimmedURL,
+                    status: .failure,
+                    detail: message
+                )
+            )
+            return
+        }
 
         let feed = Feed(
             title: displayTitle,
@@ -1499,15 +1621,49 @@ struct ContentView: View {
             isTitleManuallySet: !trimmedTitle.isEmpty
         )
         guard applyProxyValues(values, to: feed) else {
-            refreshError = "Could not save proxy password securely. Please verify Keychain is available and try again."
+            recordAddFeedStatus(
+                summary: "Add feed failed",
+                style: .failure,
+                detail: FeedRefreshDetail(
+                    feedID: nil,
+                    feedTitle: displayTitle,
+                    sourceURL: trimmedURL,
+                    status: .failure,
+                    detail: "Could not save proxy password securely. Please verify Keychain is available and try again."
+                )
+            )
             return
         }
-        feed.offlinePolicy = values.offlinePolicy
-        modelContext.insert(feed)
-        selectedFeedIDs = [feed.persistentModelID]
-        isAllFeedsSelected = false
 
-        _ = await refreshSingleFeed(feed)
+        feed.offlinePolicy = values.offlinePolicy
+        let fetchedTitle = parsedFeed.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !feed.isTitleManuallySet, !fetchedTitle.isEmpty {
+            feed.title = fetchedTitle
+        }
+
+        modelContext.insert(feed)
+        let newArticles = insertParsedItems(parsedFeed.items, into: feed)
+        feed.lastFetchedAt = Date()
+        try? modelContext.save()
+        enqueueOfflineCaching(for: newArticles, feed: feed)
+
+        if !isAllFeedsSelected {
+            selectedFeedIDs.insert(feed.persistentModelID)
+        }
+
+        let effectiveTitle = feed.title.isEmpty ? feed.urlString : feed.title
+        let successDetail = newArticles.isEmpty ? "Added successfully. No new articles yet." : "Added successfully with \(newArticles.count) article(s)."
+        recordAddFeedStatus(
+            summary: "Add feed succeeded",
+            style: .success,
+            detail: FeedRefreshDetail(
+                feedID: feed.persistentModelID,
+                feedTitle: effectiveTitle,
+                sourceURL: feed.urlString,
+                status: .success,
+                detail: successDetail
+            )
+        )
     }
 
     @MainActor
@@ -1515,7 +1671,7 @@ struct ContentView: View {
         guard let feed = feeds.first(where: { $0.persistentModelID == feedID }) else { return }
 
         let trimmedURL = values.urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmedURL), url.scheme?.hasPrefix("http") == true else {
+        guard let url = parseSupportedWebURL(trimmedURL) else {
             refreshError = "Please input a valid http(s) feed URL."
             return
         }
@@ -1527,7 +1683,10 @@ struct ContentView: View {
             refreshError = "This feed URL is already used by another subscription."
             return
         }
-        guard validateProxyValues(values) else { return }
+        if let proxyValidationError = validateProxyValues(values) {
+            refreshError = proxyValidationError
+            return
+        }
         let previousOfflinePolicy = feed.offlinePolicy
 
         let previousFetchSignature = FeedFetchSignature(
@@ -1751,6 +1910,7 @@ struct ContentView: View {
             return FeedRefreshDetail(
                 feedID: feed.persistentModelID,
                 feedTitle: feedTitle,
+                sourceURL: feed.urlString,
                 status: .success,
                 detail: detail
             )
@@ -1758,6 +1918,7 @@ struct ContentView: View {
             return FeedRefreshDetail(
                 feedID: feed.persistentModelID,
                 feedTitle: feedTitle,
+                sourceURL: feed.urlString,
                 status: .failure,
                 detail: message
             )
@@ -2023,21 +2184,105 @@ struct ContentView: View {
         didMigrateLegacyProxySecrets = true
     }
 
-    private func validateProxyValues(_ values: FeedFormValues) -> Bool {
-        guard values.useProxy || values.useProxyForContent else { return true }
+    private func validateProxyValues(_ values: FeedFormValues) -> String? {
+        guard values.useProxy || values.useProxyForContent else { return nil }
 
         if values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            refreshError = "Proxy is enabled. Please input proxy host."
-            return false
+            return "Proxy is enabled. Please input proxy host."
         }
 
         guard let port = values.proxyPort, (1...65535).contains(port) else {
-            refreshError = "Proxy is enabled. Please input a valid proxy port (1-65535)."
-            return false
+            return "Proxy is enabled. Please input a valid proxy port (1-65535)."
         }
         _ = port
 
-        return true
+        return nil
+    }
+
+    private func feedFetchProxyConfiguration(from values: FeedFormValues) -> FeedProxyConfiguration? {
+        guard values.useProxy else { return nil }
+        let host = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else { return nil }
+        guard let port = values.proxyPort, (1...65535).contains(port) else { return nil }
+
+        let username = values.proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = values.proxyPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return FeedProxyConfiguration(
+            type: values.proxyType,
+            host: host,
+            port: port,
+            username: username.isEmpty ? nil : username,
+            password: password.isEmpty ? nil : password
+        )
+    }
+
+    private func addFeedFailureMessage(for error: Error, url: URL) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .appTransportSecurityRequiresSecureConnection:
+                return "This feed requires an insecure HTTP connection and was blocked by system security policy."
+            case .cannotFindHost:
+                return "DNS could not resolve host '\(url.host ?? "unknown")'. Check DNS, proxy, or source availability."
+            case .timedOut:
+                return "The source timed out. Please try again."
+            default:
+                return urlError.localizedDescription
+            }
+        }
+        return error.localizedDescription
+    }
+
+    private func insertParsedItems(_ items: [ParsedItem], into feed: Feed) -> [Article] {
+        var existingKeys = Set(feed.articles.map(\.dedupeKey))
+        var newArticles: [Article] = []
+        newArticles.reserveCapacity(items.count)
+
+        for item in items {
+            let guid = item.guid.trimmingCharacters(in: .whitespacesAndNewlines)
+            let link = item.link.trimmingCharacters(in: .whitespacesAndNewlines)
+            let dedupeKey: String
+
+            if !guid.isEmpty {
+                dedupeKey = "guid:\(guid)"
+            } else if !link.isEmpty {
+                dedupeKey = "link:\(link)"
+            } else {
+                dedupeKey = "title:\(item.title):\(item.publishedAt?.timeIntervalSince1970 ?? 0)"
+            }
+
+            if existingKeys.contains(dedupeKey) { continue }
+            existingKeys.insert(dedupeKey)
+
+            let article = Article(
+                guid: guid,
+                title: item.title,
+                summary: item.summary,
+                link: link,
+                publishedAt: item.publishedAt,
+                feed: feed
+            )
+            newArticles.append(article)
+        }
+
+        for article in newArticles {
+            modelContext.insert(article)
+        }
+        return newArticles
+    }
+
+    @MainActor
+    private func recordAddFeedStatus(summary: String, style: LaunchRefreshStatusStyle, detail: FeedRefreshDetail) {
+        lastAddFeedStatusSummary = summary
+        lastAddFeedStatusStyle = style
+        lastAddFeedStatusAt = Date().timeIntervalSince1970
+
+        var details = lastAddFeedDetails
+        details.insert(detail, at: 0)
+        if details.count > 24 {
+            details = Array(details.prefix(24))
+        }
+        lastAddFeedDetails = details
     }
 
     @MainActor
@@ -2067,7 +2312,7 @@ struct ContentView: View {
         }
 
         let articleLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: articleLink), url.scheme?.hasPrefix("http") == true else {
+        guard let url = parseSupportedWebURL(articleLink) else {
             article.offlineStatus = .failed
             article.offlineLastError = "Invalid article URL."
             try? modelContext.save()
@@ -2670,7 +2915,7 @@ struct ContentView: View {
             }
 
             let normalizedURL = feed.urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let parsedFeedURL = URL(string: normalizedURL), parsedFeedURL.scheme?.hasPrefix("http") == true else {
+            guard parseSupportedWebURL(normalizedURL) != nil else {
                 throw backupValidationError("Backup contains an invalid feed URL: \(feed.urlString)")
             }
             try validateStringLength(feed.title, max: backupImportMaxFeedTitleLength, field: "Feed title")
@@ -2728,7 +2973,7 @@ struct ContentView: View {
 
                 let trimmedLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmedLink.isEmpty {
-                    guard let parsedLink = URL(string: trimmedLink), parsedLink.scheme?.hasPrefix("http") == true else {
+                    guard parseSupportedWebURL(trimmedLink) != nil else {
                         throw backupValidationError("Backup contains an invalid article URL: \(article.link)")
                     }
                 }
@@ -3249,7 +3494,7 @@ private struct ArticleDetailView: View {
                     .disabled(article.offlineStatus == .caching)
                 }
 
-                if let url = URL(string: article.link), !article.link.isEmpty {
+                if let url = parseSupportedWebURL(article.link) {
                     Menu {
                         Button {
                             openURL(url)
@@ -3424,7 +3669,7 @@ private struct ArticleDetailView: View {
             }
         }
 
-        guard let url = URL(string: articleLink), url.scheme?.hasPrefix("http") == true else {
+        guard let url = parseSupportedWebURL(articleLink) else {
             withAnimation(.easeInOut(duration: 0.12)) {
                 contentLoadState = hasCachedHTML ? .loaded : .fallbackSummary
                 bodyHTML = hasCachedHTML ? cachedHTML : fallbackHTML
@@ -3721,6 +3966,30 @@ private struct ArticleHTMLView: View {
             return trimmed;
           }
 
+          function isSafeMediaURL(value) {
+            var normalized = normalizeURL(value);
+            if (!normalized) return false;
+            var lower = normalized.toLowerCase();
+            return lower.startsWith("https://")
+              || lower.startsWith("http://")
+              || lower.startsWith("/")
+              || lower.startsWith("./")
+              || lower.startsWith("../")
+              || lower.startsWith("data:image/");
+          }
+
+          function isSafeLinkHref(value) {
+            var normalized = normalizeURL(value);
+            if (!normalized) return false;
+            var lower = normalized.toLowerCase();
+            return lower.startsWith("https://")
+              || lower.startsWith("http://")
+              || lower.startsWith("/")
+              || lower.startsWith("./")
+              || lower.startsWith("../")
+              || lower.startsWith("#");
+          }
+
           function firstAttr(el, names) {
             for (var i = 0; i < names.length; i++) {
               var v = el.getAttribute(names[i]);
@@ -3851,7 +4120,7 @@ private struct ArticleHTMLView: View {
             var imgs = document.querySelectorAll("img");
             imgs.forEach(function(img) {
               var src = firstAttr(img, ["src", "data-src", "data-original", "data-url", "data-lazy-src", "data-ks-lazyload"]);
-              if ((!img.getAttribute("src") || !String(img.getAttribute("src")).trim()) && src) {
+              if ((!img.getAttribute("src") || !String(img.getAttribute("src")).trim()) && src && isSafeMediaURL(src)) {
                 img.setAttribute("src", normalizeURL(src));
               }
               if (!img.getAttribute("srcset")) {
@@ -3873,7 +4142,7 @@ private struct ArticleHTMLView: View {
             var anchors = document.querySelectorAll("a");
             anchors.forEach(function(a) {
               var href = firstAttr(a, ["href", "data-href", "data-url", "data-link"]);
-              if ((!a.getAttribute("href") || !String(a.getAttribute("href")).trim()) && href) {
+              if ((!a.getAttribute("href") || !String(a.getAttribute("href")).trim()) && href && isSafeLinkHref(href)) {
                 a.setAttribute("href", normalizeURL(href));
               }
             });
@@ -3935,6 +4204,9 @@ private struct ArticleHTMLView: View {
             "<noscript\\b[^>]*>[\\s\\S]*?</noscript>",
             "<meta\\b[^>]*>",
             "<link\\b[^>]*>",
+            "<base\\b[^>]*>",
+            "<(?:iframe|object|embed|applet|portal)\\b[^>]*>[\\s\\S]*?</(?:iframe|object|embed|applet|portal)>",
+            "<(?:iframe|object|embed|applet|portal)\\b[^>]*/?>",
             "<(?:header|nav|aside|footer|form)\\b[^>]*>[\\s\\S]*?</(?:header|nav|aside|footer|form)>"
         ]
 
@@ -3961,7 +4233,8 @@ private struct ArticleHTMLView: View {
 
         let attributePatterns: [String] = [
             "\\sstyle\\s*=\\s*(\"[^\"]*\"|'[^']*')",
-            "\\son\\w+\\s*=\\s*(\"[^\"]*\"|'[^']*')"
+            "\\son\\w+\\s*=\\s*(\"[^\"]*\"|'[^']*'|[^\\s>]+)",
+            "\\s(?:href|src|poster|xlink:href)\\s*=\\s*(\"\\s*(?:javascript|vbscript):[^\"]*\"|'\\s*(?:javascript|vbscript):[^']*'|\\s*(?:javascript|vbscript):[^\\s>]+)"
         ]
 
         for pattern in attributePatterns {
@@ -3972,6 +4245,20 @@ private struct ArticleHTMLView: View {
 
         return output
     }
+
+}
+
+private func parseSupportedWebURL(_ raw: String) -> URL? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, let url = URL(string: trimmed) else { return nil }
+    guard isSupportedWebURL(url) else { return nil }
+    return url
+}
+
+private func isSupportedWebURL(_ url: URL) -> Bool {
+    guard let scheme = url.scheme?.lowercased(), (scheme == "http" || scheme == "https") else { return false }
+    guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else { return false }
+    return true
 }
 
 #if os(macOS)
@@ -4500,7 +4787,7 @@ private struct RefreshDetailsView: View {
     let title: String
     let timestamp: Date?
     let details: [FeedRefreshDetail]
-    let onRetryFailedOnly: () -> Void
+    let onRetryFailedOnly: (() -> Void)?
 
     private var failedCount: Int {
         details.filter(\.isFailure).count
@@ -4565,9 +4852,29 @@ private struct RefreshDetailsView: View {
                                     .font(.caption2)
                                     .foregroundStyle(item.isFailure ? .red : .secondary)
                                     .lineLimit(2)
+                                if let sourceURL = item.sourceURL, !sourceURL.isEmpty {
+                                    Text(sourceURL)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
                             }
                         }
                         .padding(.vertical, 2)
+                        .contextMenu {
+                            if let sourceURL = item.sourceURL, !sourceURL.isEmpty {
+                                Button {
+                                    copyToClipboard(sourceURL)
+                                } label: {
+                                    Label("Copy URL", systemImage: "doc.on.doc")
+                                }
+                            }
+                            Button {
+                                copyToClipboard("\(item.feedTitle)\n\(item.detail)")
+                            } label: {
+                                Label("Copy Detail", systemImage: "text.quote")
+                            }
+                        }
                     }
                     .frame(minHeight: 260)
                 }
@@ -4576,10 +4883,12 @@ private struct RefreshDetailsView: View {
 
             Divider()
             HStack {
-                Button("Retry Failed Only") {
-                    onRetryFailedOnly()
+                if let onRetryFailedOnly {
+                    Button("Retry Failed Only") {
+                        onRetryFailedOnly()
+                    }
+                    .disabled(failedCount == 0)
                 }
-                .disabled(failedCount == 0)
                 Spacer()
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
@@ -4619,6 +4928,12 @@ private struct RefreshDetailsView: View {
                                 Text(item.detail)
                                     .font(.caption2)
                                     .foregroundStyle(item.isFailure ? .red : .secondary)
+                                if let sourceURL = item.sourceURL, !sourceURL.isEmpty {
+                                    Text(sourceURL)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
                             }
                             .padding(.vertical, 2)
                         }
@@ -4630,14 +4945,25 @@ private struct RefreshDetailsView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Retry Failed") {
-                        onRetryFailedOnly()
+                if let onRetryFailedOnly {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Retry Failed") {
+                            onRetryFailedOnly()
+                        }
+                        .disabled(failedCount == 0)
                     }
-                    .disabled(failedCount == 0)
                 }
             }
         }
+        #endif
+    }
+
+    private func copyToClipboard(_ text: String) {
+        #if os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #else
+        UIPasteboard.general.string = text
         #endif
     }
 }

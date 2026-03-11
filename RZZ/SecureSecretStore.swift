@@ -34,7 +34,7 @@ enum SecureSecretStore {
         var addAttrs = query
         addAttrs[kSecValueData as String] = data
         #if os(iOS) || os(tvOS) || os(watchOS)
-        addAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        addAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         #endif
 
         let addStatus = SecItemAdd(addAttrs as CFDictionary, nil)
@@ -50,7 +50,8 @@ enum SecureSecretStore {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
         ]
     }
 }

@@ -27,10 +27,16 @@ enum WebKitRSSFallback {
         return html
     }
 
-    private static func isAllowedWebURL(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased() else { return false }
-        return scheme == "http" || scheme == "https"
+}
+
+private func isAllowedWebURL(_ url: URL) -> Bool {
+    guard let scheme = url.scheme?.lowercased(), (scheme == "http" || scheme == "https") else {
+        return false
     }
+    guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else {
+        return false
+    }
+    return true
 }
 
 @MainActor
@@ -127,6 +133,32 @@ private final class XMLPageLoader: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         finish(with: .failure(error))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url, isAllowedWebURL(url) else {
+            decisionHandler(.cancel)
+            finish(with: .failure(URLError(.unsupportedURL)))
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        if let url = navigationResponse.response.url, !isAllowedWebURL(url) {
+            decisionHandler(.cancel)
+            finish(with: .failure(URLError(.unsupportedURL)))
+            return
+        }
+        decisionHandler(.allow)
     }
 
     private func finish(with result: Result<String, Error>) {
@@ -262,6 +294,32 @@ private final class HTMLPageLoader: NSObject, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         finish(with: .failure(error))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url, isAllowedWebURL(url) else {
+            decisionHandler(.cancel)
+            finish(with: .failure(URLError(.unsupportedURL)))
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        if let url = navigationResponse.response.url, !isAllowedWebURL(url) {
+            decisionHandler(.cancel)
+            finish(with: .failure(URLError(.unsupportedURL)))
+            return
+        }
+        decisionHandler(.allow)
     }
 
     private func finish(with result: Result<String, Error>) {
