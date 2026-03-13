@@ -149,6 +149,14 @@ private struct OfflineCacheSummary {
     let feedUsages: [OfflineCacheFeedUsage]
 }
 
+private struct OfflineCacheRequest {
+    let articleID: PersistentIdentifier
+    let generation: Int
+    let url: URL
+    let proxy: FeedProxyConfiguration?
+    let allowInsecureHTTPContent: Bool
+}
+
 struct ContentView: View {
     @Binding var isAppLocked: Bool
     @Binding var appLockPINHash: String
@@ -215,6 +223,8 @@ struct ContentView: View {
     @State private var collapsedFolderNames: Set<String> = []
     @State private var articleListFocusRequest: ArticleListFocusRequest?
     @State private var offlineCachingArticleIDs: Set<PersistentIdentifier> = []
+    @State private var offlinePendingRequests: [PersistentIdentifier: OfflineCacheRequest] = [:]
+    @State private var offlinePendingOrder: [PersistentIdentifier] = []
     @State private var offlineCacheGeneration: Int = 0
     @State private var didMigrateLegacyProxySecrets = false
     @State private var exportBackupFilename = ""
@@ -238,6 +248,10 @@ struct ContentView: View {
     private let backupImportMaxTagNameLength = 80
     private let launchAutoRefreshDelayNanoseconds: UInt64 = 1_200_000_000
     private let launchAutoRefreshMinimumInterval: TimeInterval = 15 * 60
+    private let offlineMaxConcurrentTasks = 4
+    private let offlineMaxQueuedTasks = 96
+    private let offlineMaxEnqueuePerBatch = 24
+    private let offlineMaxHTMLBytes = 5_000_000
 
     private var selectedTagFilter: Tag? {
         guard let uuid = UUID(uuidString: selectedTagFilterUUIDString) else { return nil }
@@ -2351,9 +2365,24 @@ struct ContentView: View {
     @MainActor
     private func enqueueOfflineCaching(for candidates: [Article], feed: Feed, force: Bool = false) {
         guard feed.offlinePolicy == .fullContent else { return }
-        for article in candidates {
+        let prioritized = prioritizedOfflineCandidates(candidates, force: force)
+        for article in prioritized {
             enqueueOfflineCaching(for: article, feed: feed, force: force)
         }
+    }
+
+    private func prioritizedOfflineCandidates(_ candidates: [Article], force: Bool) -> [Article] {
+        var seen: Set<PersistentIdentifier> = []
+        let sorted = candidates.sorted { lhs, rhs in
+            (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
+        }
+        let unique = sorted.filter { article in
+            seen.insert(article.persistentModelID).inserted
+        }
+        if force {
+            return unique
+        }
+        return Array(unique.prefix(offlineMaxEnqueuePerBatch))
     }
 
     @MainActor
@@ -2361,6 +2390,7 @@ struct ContentView: View {
         guard feed.offlinePolicy == .fullContent else { return }
         if !force, article.hasOfflineContent { return }
         guard !offlineCachingArticleIDs.contains(article.persistentModelID) else { return }
+        guard offlinePendingRequests[article.persistentModelID] == nil else { return }
 
         if !force, cacheOfflineFromFeedContentIfAvailable(for: article) {
             try? modelContext.save()
@@ -2380,18 +2410,63 @@ struct ContentView: View {
         let selectedProxy: FeedProxyConfiguration? = feed.useProxyForContent ? feed.contentProxyConfiguration : nil
         let allowInsecureHTTPContent = feed.allowInsecureHTTPForContent
 
-        offlineCachingArticleIDs.insert(articleID)
         article.offlineStatus = .caching
         article.offlineLastError = ""
         try? modelContext.save()
+
+        let request = OfflineCacheRequest(
+            articleID: articleID,
+            generation: generation,
+            url: url,
+            proxy: selectedProxy,
+            allowInsecureHTTPContent: allowInsecureHTTPContent
+        )
+        scheduleOfflineCaching(request)
+    }
+
+    @MainActor
+    private func scheduleOfflineCaching(_ request: OfflineCacheRequest) {
+        if offlineCachingArticleIDs.contains(request.articleID) {
+            return
+        }
+        if offlinePendingRequests[request.articleID] != nil {
+            return
+        }
+
+        if offlineCachingArticleIDs.count < offlineMaxConcurrentTasks {
+            startOfflineCaching(request)
+            return
+        }
+
+        guard offlinePendingOrder.count < offlineMaxQueuedTasks else {
+            if let article = articles.first(where: { $0.persistentModelID == request.articleID }) {
+                if article.hasOfflineContent {
+                    article.offlineStatus = .cached
+                    article.offlineLastError = ""
+                } else {
+                    article.offlineStatus = .failed
+                    article.offlineLastError = "Offline queue is full. Please retry later."
+                }
+                try? modelContext.save()
+            }
+            return
+        }
+
+        offlinePendingRequests[request.articleID] = request
+        offlinePendingOrder.append(request.articleID)
+    }
+
+    @MainActor
+    private func startOfflineCaching(_ request: OfflineCacheRequest) {
+        offlineCachingArticleIDs.insert(request.articleID)
 
         Task(priority: .utility) {
             let result: Result<String, Error>
             do {
                 let html = try await RSSService.fetchArticleHTML(
-                    from: url,
-                    proxy: selectedProxy,
-                    allowInsecureHTTPInWebContent: allowInsecureHTTPContent
+                    from: request.url,
+                    proxy: request.proxy,
+                    allowInsecureHTTPInWebContent: request.allowInsecureHTTPContent
                 )
                 result = .success(html)
             } catch {
@@ -2400,11 +2475,28 @@ struct ContentView: View {
 
             await MainActor.run {
                 applyOfflineCachingResult(
-                    articleID: articleID,
-                    generation: generation,
+                    articleID: request.articleID,
+                    generation: request.generation,
                     result: result
                 )
             }
+        }
+    }
+
+    @MainActor
+    private func pumpOfflineCachingQueueIfPossible() {
+        guard offlineCachingArticleIDs.count < offlineMaxConcurrentTasks else { return }
+
+        while offlineCachingArticleIDs.count < offlineMaxConcurrentTasks,
+              let nextID = offlinePendingOrder.first {
+            offlinePendingOrder.removeFirst()
+            guard let request = offlinePendingRequests.removeValue(forKey: nextID) else {
+                continue
+            }
+            guard request.generation == offlineCacheGeneration else {
+                continue
+            }
+            startOfflineCaching(request)
         }
     }
 
@@ -2415,6 +2507,7 @@ struct ContentView: View {
         result: Result<String, Error>
     ) {
         offlineCachingArticleIDs.remove(articleID)
+        defer { pumpOfflineCachingQueueIfPossible() }
         guard generation == offlineCacheGeneration else { return }
         guard let article = articles.first(where: { $0.persistentModelID == articleID }) else { return }
 
@@ -2427,8 +2520,20 @@ struct ContentView: View {
                 try? modelContext.save()
                 return
             }
+            let htmlByteCount = html.lengthOfBytes(using: .utf8)
+            if htmlByteCount > offlineMaxHTMLBytes {
+                if article.hasOfflineContent {
+                    article.offlineStatus = .cached
+                    article.offlineLastError = ""
+                } else {
+                    article.offlineStatus = .failed
+                    article.offlineLastError = "Article is too large for offline cache (limit \(ByteCountFormatter.string(fromByteCount: Int64(offlineMaxHTMLBytes), countStyle: .file)))."
+                }
+                try? modelContext.save()
+                return
+            }
             article.offlineCachedHTML = html
-            article.offlineCachedBytes = html.lengthOfBytes(using: .utf8)
+            article.offlineCachedBytes = htmlByteCount
             article.offlineCachedAt = Date()
             article.offlineLastError = ""
             article.offlineStatus = .cached
@@ -2449,9 +2554,11 @@ struct ContentView: View {
     private func cacheOfflineFromFeedContentIfAvailable(for article: Article) -> Bool {
         let summary = article.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !summary.isEmpty else { return false }
+        let summaryBytes = article.summary.lengthOfBytes(using: .utf8)
+        guard summaryBytes <= offlineMaxHTMLBytes else { return false }
 
         article.offlineCachedHTML = article.summary
-        article.offlineCachedBytes = article.summary.lengthOfBytes(using: .utf8)
+        article.offlineCachedBytes = summaryBytes
         article.offlineCachedAt = Date()
         article.offlineStatus = .cached
         article.offlineLastError = ""
@@ -2462,6 +2569,8 @@ struct ContentView: View {
     private func clearAllOfflineCache() {
         offlineCacheGeneration += 1
         offlineCachingArticleIDs.removeAll()
+        offlinePendingRequests.removeAll()
+        offlinePendingOrder.removeAll()
         for article in articles {
             clearOfflineCacheFields(for: article)
         }
@@ -2475,6 +2584,8 @@ struct ContentView: View {
         offlineCacheGeneration += 1
         for article in feed.articles {
             offlineCachingArticleIDs.remove(article.persistentModelID)
+            offlinePendingRequests.removeValue(forKey: article.persistentModelID)
+            offlinePendingOrder.removeAll { $0 == article.persistentModelID }
             clearOfflineCacheFields(for: article)
         }
         try? modelContext.save()
@@ -3082,6 +3193,8 @@ struct ContentView: View {
 
         offlineCacheGeneration += 1
         offlineCachingArticleIDs.removeAll()
+        offlinePendingRequests.removeAll()
+        offlinePendingOrder.removeAll()
         selectedArticleID = nil
         selectedFeedIDs.removeAll()
         isAllFeedsSelected = true
