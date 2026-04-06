@@ -1,6 +1,8 @@
 (function () {
   const FALLBACK_CONFIG = {
     dmgUrl: "#",
+    dmgSha256: "",
+    dmgSha256Url: "",
     releasesUrl: "#",
     donateUrl: "#",
     feedbackEmail: "feedback@example.com",
@@ -19,6 +21,8 @@
       cta_download: "Download DMG Trial",
       cta_releases: "Release Notes",
       cta_donate: "PayPal Donate",
+      checksum_label: "SHA256:",
+      checksum_file_label: "download .sha256",
       hero_meta_html: "Distribution channel: GitHub Release + DMG.<br />Donation is optional and does not affect feature access.",
       highlights_title: "Highlights First",
       highlight_lock_title: "App Lock (PIN)",
@@ -40,19 +44,6 @@
       step_3: "Optionally configure proxy strategy per feed for feed URL access and content access separately.",
       step_4: "Read articles in rendered mode, then star/tag/filter for your workflow.",
       step_5: "Use import/export backup for migration or device change.",
-      channels_title: "Distribution Channels",
-      table_h_channel: "Channel",
-      table_h_dist: "Distribution",
-      table_h_donation: "Donation",
-      table_h_positioning: "Positioning",
-      table_row1_c1: "DMG Trial",
-      table_row1_c2: "GitHub Release",
-      table_row1_c3: "External PayPal (optional)",
-      table_row1_c4: "Fast trial + feedback loop",
-      table_row2_c1: "App Store",
-      table_row2_c2: "App Store review/release",
-      table_row2_c3: "No external payment link in app binary",
-      table_row2_c4: "Compliance-oriented stable release",
       feedback_title: "Feedback & Contact",
       feedback_email_label: "Questions or suggestions: ",
       feedback_issue_label: "Issue tracker: ",
@@ -68,6 +59,8 @@
       cta_download: "下载 DMG 试用版",
       cta_releases: "更新日志",
       cta_donate: "PayPal 赞助",
+      checksum_label: "SHA256：",
+      checksum_file_label: "下载 .sha256",
       hero_meta_html: "分发渠道：GitHub Release + DMG。<br />Donate 为自愿支持，不影响功能使用。",
       highlights_title: "优先亮点",
       highlight_lock_title: "App Lock（PIN）",
@@ -89,19 +82,6 @@
       step_3: "按需配置代理策略：Feed URL 访问与正文访问可分别设置。",
       step_4: "在渲染模式阅读文章，并用星标/标签/过滤器组织内容。",
       step_5: "设备迁移或重装时使用导入/导出备份。",
-      channels_title: "发布渠道",
-      table_h_channel: "渠道",
-      table_h_dist: "分发方式",
-      table_h_donation: "Donation",
-      table_h_positioning: "定位",
-      table_row1_c1: "DMG 试用版",
-      table_row1_c2: "GitHub Release",
-      table_row1_c3: "外部 PayPal（可选）",
-      table_row1_c4: "快速试用 + 反馈迭代",
-      table_row2_c1: "App Store 版",
-      table_row2_c2: "App Store 审核发布",
-      table_row2_c3: "应用内不含外部支付入口",
-      table_row2_c4: "合规优先的稳定分发",
       feedback_title: "反馈与联系",
       feedback_email_label: "问题与建议：",
       feedback_issue_label: "Issue 跟踪：",
@@ -115,12 +95,22 @@
     const download = document.getElementById("link-download");
     const releases = document.getElementById("link-releases");
     const donate = document.getElementById("link-donate");
+    const checksumValue = document.getElementById("checksum-value");
+    const checksumFile = document.getElementById("link-checksum-file");
     const feedbackEmail = document.getElementById("link-feedback-email");
     const issues = document.getElementById("link-issues");
 
     download.href = cfg.dmgUrl;
     releases.href = cfg.releasesUrl;
     donate.href = cfg.donateUrl;
+    checksumValue.textContent = cfg.dmgSha256 || "-";
+    if (cfg.dmgSha256Url) {
+      checksumFile.href = cfg.dmgSha256Url;
+      checksumFile.style.display = "";
+    } else {
+      checksumFile.removeAttribute("href");
+      checksumFile.style.display = "none";
+    }
     feedbackEmail.href = "mailto:" + cfg.feedbackEmail;
     feedbackEmail.textContent = cfg.feedbackEmail;
     issues.href = cfg.issuesUrl;

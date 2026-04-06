@@ -144,6 +144,32 @@ h1 {
   line-height: 1.6;
 }
 
+.checksum-line {
+  margin-top: 14px;
+}
+
+.checksum-line code {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 6px;
+  border: 1px solid #d7e1f1;
+  border-radius: 6px;
+  background: #f7faff;
+  color: #284164;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.checksum-link {
+  color: #2f58a0;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.checksum-link:hover {
+  border-bottom-color: #2f58a0;
+}
+
 .section {
   padding: 56px 0;
 }
@@ -209,36 +235,6 @@ p {
   border-radius: 6px;
   padding: 1px 6px;
   color: #1a4ca3;
-}
-
-.table-wrap {
-  overflow-x: auto;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  background: #fff;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  overflow: hidden;
-}
-
-th, td {
-  text-align: left;
-  padding: 12px 14px;
-  border-bottom: 1px solid #e6edf8;
-  color: #324a71;
-  font-size: 15px;
-}
-
-th {
-  background: #f0f6ff;
-  color: #274f8a;
-}
-
-tbody tr:last-child td {
-  border-bottom: 0;
 }
 
 .footer {

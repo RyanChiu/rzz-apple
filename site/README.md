@@ -21,6 +21,8 @@ This folder contains the static landing page for the direct DMG trial channel.
 Edit `config.js`:
 
 - `dmgUrl`
+- `dmgSha256`
+- `dmgSha256Url`
 - `releasesUrl`
 - `donateUrl` (PayPal)
 - `feedbackEmail`
