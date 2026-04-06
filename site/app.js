@@ -56,7 +56,9 @@
       feedback_title: "Feedback & Contact",
       feedback_email_label: "Questions or suggestions: ",
       feedback_issue_label: "Issue tracker: ",
-      footer_disclaimer: "Disclaimer: DMG trial is intended for evaluation and feedback. Please assess your own network/data risk."
+      footer_disclaimer: "Disclaimer: DMG trial is intended for evaluation and feedback. Please assess your own network/data risk.",
+      footer_privacy: "Privacy Policy",
+      footer_terms: "Terms of Use"
     },
     zh: {
       page_title: "RZZ - 面向 macOS 与 iPhone 的轻量 RSS 阅读器",
@@ -103,7 +105,9 @@
       feedback_title: "反馈与联系",
       feedback_email_label: "问题与建议：",
       feedback_issue_label: "Issue 跟踪：",
-      footer_disclaimer: "免责声明：DMG 试用版用于评估与反馈，请自行评估网络与数据风险。"
+      footer_disclaimer: "免责声明：DMG 试用版用于评估与反馈，请自行评估网络与数据风险。",
+      footer_privacy: "隐私政策",
+      footer_terms: "使用条款"
     }
   };
 

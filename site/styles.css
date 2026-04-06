@@ -255,6 +255,16 @@ tbody tr:last-child td {
   color: #7c8aa0;
 }
 
+.legal-links a {
+  color: #3d5f99;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.legal-links a:hover {
+  border-bottom-color: #3d5f99;
+}
+
 @media (max-width: 900px) {
   .hero-top {
     align-items: flex-start;
