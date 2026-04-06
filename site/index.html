@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RZZ - Lightweight RSS Reader for macOS & iPhone</title>
+  <meta name="description" content="RZZ is a lightweight RSS reader for macOS and iPhone with app lock, import/export backup, proxy controls, and smooth reading." />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <div class="hero-top">
+        <div class="badge" data-i18n="badge"></div>
+        <div class="lang-switch" role="group" aria-label="Language switch">
+          <button id="lang-en" class="lang-btn" type="button">EN</button>
+          <button id="lang-zh" class="lang-btn" type="button">中文</button>
+        </div>
+      </div>
+      <h1>RZZ</h1>
+      <p class="subtitle" data-i18n-html="subtitle_html"></p>
+      <div class="cta-row">
+        <a id="link-download" class="btn primary" target="_blank" rel="noopener noreferrer" data-i18n="cta_download"></a>
+        <a id="link-releases" class="btn ghost" target="_blank" rel="noopener noreferrer" data-i18n="cta_releases"></a>
+        <a id="link-donate" class="btn ghost" target="_blank" rel="noopener noreferrer" data-i18n="cta_donate"></a>
+      </div>
+      <p class="meta" data-i18n-html="hero_meta_html"></p>
+    </div>
+  </header>
+
+  <main>
+    <section class="section">
+      <div class="container">
+        <h2 data-i18n="highlights_title"></h2>
+        <div class="grid three">
+          <article class="card card-strong">
+            <h3 data-i18n="highlight_lock_title"></h3>
+            <p data-i18n="highlight_lock_desc"></p>
+          </article>
+          <article class="card card-strong">
+            <h3 data-i18n="highlight_backup_title"></h3>
+            <p data-i18n="highlight_backup_desc"></p>
+          </article>
+          <article class="card">
+            <h3 data-i18n="highlight_proxy_title"></h3>
+            <p data-i18n="highlight_proxy_desc"></p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt">
+      <div class="container">
+        <h2 data-i18n="core_title"></h2>
+        <ul class="feature-list">
+          <li data-i18n="core_1"></li>
+          <li data-i18n="core_2"></li>
+          <li data-i18n="core_3"></li>
+          <li data-i18n="core_4"></li>
+          <li data-i18n="core_5"></li>
+          <li data-i18n="core_6"></li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <h2 data-i18n="quickstart_title"></h2>
+        <ol class="steps">
+          <li data-i18n="step_1"></li>
+          <li data-i18n-html="step_2_html"></li>
+          <li data-i18n="step_3"></li>
+          <li data-i18n="step_4"></li>
+          <li data-i18n="step_5"></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section alt">
+      <div class="container">
+        <h2 data-i18n="channels_title"></h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th data-i18n="table_h_channel"></th>
+                <th data-i18n="table_h_dist"></th>
+                <th data-i18n="table_h_donation"></th>
+                <th data-i18n="table_h_positioning"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td data-i18n="table_row1_c1"></td>
+                <td data-i18n="table_row1_c2"></td>
+                <td data-i18n="table_row1_c3"></td>
+                <td data-i18n="table_row1_c4"></td>
+              </tr>
+              <tr>
+                <td data-i18n="table_row2_c1"></td>
+                <td data-i18n="table_row2_c2"></td>
+                <td data-i18n="table_row2_c3"></td>
+                <td data-i18n="table_row2_c4"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <h2 data-i18n="feedback_title"></h2>
+        <p>
+          <span data-i18n="feedback_email_label"></span>
+          <a id="link-feedback-email"></a>
+        </p>
+        <p>
+          <span data-i18n="feedback_issue_label"></span>
+          <a id="link-issues" target="_blank" rel="noopener noreferrer"></a>
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <p>© <span id="year"></span> RZZ. All rights reserved.</p>
+      <p class="small" data-i18n="footer_disclaimer"></p>
+    </div>
+  </footer>
+
+  <script src="./config.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -99,6 +99,16 @@ xcodebuild -project RZZ.xcodeproj -scheme RZZ -destination 'platform=macOS' buil
 xcodebuild -project RZZ.xcodeproj -scheme RZZ -destination 'generic/platform=iOS' build
 ```
 
+## Release Channels
+
+Recommended release split:
+
+- `release/direct`: DMG trial distribution (can include external donate link in website/app channel).
+- `release/appstore`: App Store submission build (no external payment link in app binary).
+
+For static DMG landing page files, see `site/`.
+The site supports EN/中文 switch and reads deployment links from `site/config.js`.
+
 ## Project Structure
 
 - `RZZ/ContentView.swift`: main UI, feed/folder/article interactions, filters, dialogs
