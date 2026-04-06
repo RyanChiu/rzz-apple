@@ -109,6 +109,31 @@ Recommended release split:
 For static DMG landing page files, see `site/`.
 The site supports EN/中文 switch and reads deployment links from `site/config.js`.
 
+## DMG Release Automation
+
+This repo includes a GitHub Actions workflow:
+
+- `.github/workflows/release-dmg.yml`
+- `scripts/build_dmg.sh`
+
+How to publish a DMG release:
+
+1. Push a tag like `v1.0.1`.
+2. GitHub Actions builds an unsigned macOS Release app and packages `dist/RZZ-<version>-macOS.dmg`.
+3. The DMG is attached to the GitHub Release asset for that tag.
+
+Example:
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+Important:
+
+- If the repository is private, release asset links require GitHub authentication.
+- To provide a public download link via GitHub Releases, the repository must be public.
+
 ## Project Structure
 
 - `RZZ/ContentView.swift`: main UI, feed/folder/article interactions, filters, dialogs
