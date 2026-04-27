@@ -4,6 +4,7 @@
     dmgSha256: "",
     dmgSha256Url: "",
     releasesUrl: "#",
+    repoUrl: "#",
     donateUrl: "#",
     feedbackEmail: "feedback@example.com",
     issuesUrl: "#",
@@ -46,6 +47,7 @@
       step_5: "Use import/export backup for migration or device change.",
       feedback_title: "Feedback & Contact",
       feedback_email_label: "Questions or suggestions: ",
+      feedback_repo_label: "GitHub repository: ",
       feedback_issue_label: "Issue tracker: ",
       footer_disclaimer: "Disclaimer: DMG trial is intended for evaluation and feedback. Please assess your own network/data risk.",
       footer_privacy: "Privacy Policy",
@@ -84,6 +86,7 @@
       step_5: "设备迁移或重装时使用导入/导出备份。",
       feedback_title: "反馈与联系",
       feedback_email_label: "问题与建议：",
+      feedback_repo_label: "GitHub 仓库：",
       feedback_issue_label: "Issue 跟踪：",
       footer_disclaimer: "免责声明：DMG 试用版用于评估与反馈，请自行评估网络与数据风险。",
       footer_privacy: "隐私政策",
@@ -98,6 +101,7 @@
     const checksumValue = document.getElementById("checksum-value");
     const checksumFile = document.getElementById("link-checksum-file");
     const feedbackEmail = document.getElementById("link-feedback-email");
+    const repo = document.getElementById("link-repo");
     const issues = document.getElementById("link-issues");
 
     download.href = cfg.dmgUrl;
@@ -113,6 +117,8 @@
     }
     feedbackEmail.href = "mailto:" + cfg.feedbackEmail;
     feedbackEmail.textContent = cfg.feedbackEmail;
+    repo.href = cfg.repoUrl;
+    repo.textContent = cfg.repoUrl;
     issues.href = cfg.issuesUrl;
     issues.textContent = cfg.issuesUrl;
   }

@@ -24,6 +24,7 @@ Edit `config.js`:
 - `dmgSha256`
 - `dmgSha256Url`
 - `releasesUrl`
+- `repoUrl`
 - `donateUrl` (PayPal)
 - `feedbackEmail`
 - `issuesUrl`
