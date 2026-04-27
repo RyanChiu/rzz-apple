@@ -30,6 +30,12 @@ Edit `config.js`:
 - `issuesUrl`
 - `defaultLanguage` (`en` or `zh`)
 
+Recommended (public GitHub release channel):
+
+- `dmgUrl`: `https://github.com/<owner>/rzz-apple/releases/latest/download/RZZ-latest-macOS.dmg`
+- `dmgSha256Url`: `https://github.com/<owner>/rzz-apple/releases/latest/download/RZZ-latest-macOS.dmg.sha256`
+- Keep `dmgSha256` empty when using latest alias links.
+
 ## Deploy
 
 Upload these files to your web path:

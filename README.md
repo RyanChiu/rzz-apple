@@ -120,7 +120,9 @@ How to publish a DMG release:
 
 1. Push a tag like `v1.0.1`.
 2. GitHub Actions builds an unsigned macOS Release app and packages `dist/RZZ-<version>-macOS.dmg`.
-3. The DMG is attached to the GitHub Release asset for that tag.
+3. Workflow also creates a latest alias: `dist/RZZ-latest-macOS.dmg`.
+4. Workflow generates SHA256 files for both DMGs (`*.dmg.sha256`).
+5. All files are attached to the GitHub Release asset for that tag.
 
 Example:
 
@@ -133,6 +135,11 @@ Important:
 
 - If the repository is private, release asset links require GitHub authentication.
 - To provide a public download link via GitHub Releases, the repository must be public.
+- This DMG flow is currently unsigned/not notarized. For production distribution, use Apple Developer ID signing + notarization.
+
+## Security Reporting
+
+Please report vulnerabilities responsibly via [SECURITY.md](SECURITY.md).
 
 ## Project Structure
 
