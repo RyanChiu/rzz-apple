@@ -3,7 +3,7 @@
 ## 1) App Summary
 - App Name: `RZZ`
 - Category: RSS Reader
-- Platforms: `macOS` / `iOS`
+- Platforms: `macOS`
 - Core Function:
   - Users add custom RSS/Atom feed URLs.
   - App fetches feed metadata and article content for reading and optional offline cache.

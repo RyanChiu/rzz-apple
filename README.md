@@ -1,10 +1,10 @@
 # rzz-apple
 
-RZZ is a lightweight RSS reader for Apple platforms (macOS + iPhone), designed for custom feed URLs, structured feed management, and smooth reading.
+RZZ is a lightweight RSS reader for macOS, designed for custom feed URLs, structured feed management, and smooth reading.
 
 ## Highlights
 
-- One codebase for macOS and iOS.
+- Focused macOS experience with desktop-first workflow.
 - Add any valid RSS URL and cache articles locally.
 - Feed organization with folders (default `New Added` + custom folders).
 - Per-feed proxy control with two independent switches:
@@ -92,11 +92,10 @@ On relaunch, RZZ restores previous state as much as possible:
 
 ## Build
 
-From repository root:
+From repository root (macOS):
 
 ```bash
 xcodebuild -project RZZ.xcodeproj -scheme RZZ -destination 'platform=macOS' build
-xcodebuild -project RZZ.xcodeproj -scheme RZZ -destination 'generic/platform=iOS' build
 ```
 
 ## Release Channels
@@ -151,4 +150,4 @@ Please report vulnerabilities responsibly via [SECURITY.md](SECURITY.md).
 
 ## Current Scope
 
-This repository currently targets a practical V1/V1+ workflow for personal RSS reading and management on Apple devices, with emphasis on reliability, proxy flexibility, and efficient daily reading.
+This repository currently targets a practical V1/V1+ workflow for personal RSS reading and management on macOS, with emphasis on reliability, proxy flexibility, and efficient daily reading.

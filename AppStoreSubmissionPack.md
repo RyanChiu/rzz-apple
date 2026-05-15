@@ -5,8 +5,8 @@ Updated: 2026-03-10
 ## 1) Release Readiness Checklist
 
 ### A. Build / Version
-- [ ] Confirm `MARKETING_VERSION` for this release (current: `1.0`).
-- [ ] Confirm `CURRENT_PROJECT_VERSION` build number bump (current: `1`).
+- [ ] Confirm `MARKETING_VERSION` for this release (current: `1.0.3`).
+- [ ] Confirm `CURRENT_PROJECT_VERSION` build number bump (current: `3`).
 - [x] Bundle ID is stable: `sivaz.RZZ`.
 - [x] Export compliance is set: `ITSAppUsesNonExemptEncryption = NO`.
 - [x] ATS baseline is tightened:
@@ -36,7 +36,6 @@ Updated: 2026-03-10
 
 ### D. App Store Connect Assets
 - [ ] App icon (final production icon) uploaded.
-- [ ] iPhone screenshots uploaded.
 - [ ] macOS screenshots uploaded.
 - [ ] App description / keywords / subtitle finalized.
 - [ ] Support URL filled.
@@ -59,8 +58,8 @@ Updated: 2026-03-10
 - 中文: `可控代理的 RSS 阅读器`
 
 ### Promotional Text (optional)
-- EN: `Read your custom RSS feeds on Mac and iPhone with per-feed proxy, offline cache, and app lock.`
-- 中文: `在 Mac 和 iPhone 上阅读自定义 RSS，支持逐源代理、离线缓存与应用锁。`
+- EN: `Read your custom RSS feeds on Mac with per-feed proxy, offline cache, and app lock.`
+- 中文: `在 Mac 上阅读自定义 RSS，支持逐源代理、离线缓存与应用锁。`
 
 ### Keywords (comma-separated)
 - EN: `rss,reader,feed,news,offline,proxy,star,tag`
