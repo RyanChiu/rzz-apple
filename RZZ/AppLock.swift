@@ -4,6 +4,36 @@ import Combine
 import CommonCrypto
 import Security
 
+enum AppThemeMode: String, CaseIterable, Identifiable {
+    case light
+    case dark
+    case system
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .light:
+            return "Light"
+        case .dark:
+            return "Dark"
+        case .system:
+            return "Follow System"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        case .system:
+            return nil
+        }
+    }
+}
+
 enum AppLockPINMigrationResult {
     case notNeeded
     case migrated
@@ -219,11 +249,13 @@ enum AppLockPINLengthStore {
 struct AppLockSettingsView: View {
     @Binding var isEnabled: Bool
     @Binding var pinHash: String
+    @Binding var appThemeModeRaw: String
 
     @Environment(\.dismiss) private var dismiss
 
     @State private var draftIsEnabled: Bool
     @State private var draftPINHash: String
+    @State private var draftThemeModeRaw: String
     @State private var currentPIN = ""
     @State private var newPIN = ""
     @State private var confirmPIN = ""
@@ -231,11 +263,14 @@ struct AppLockSettingsView: View {
     @State private var isErrorMessage = false
     @State private var draftPINLength: Int
 
-    init(isEnabled: Binding<Bool>, pinHash: Binding<String>) {
+    init(isEnabled: Binding<Bool>, pinHash: Binding<String>, appThemeModeRaw: Binding<String>) {
         _isEnabled = isEnabled
         _pinHash = pinHash
+        _appThemeModeRaw = appThemeModeRaw
         _draftIsEnabled = State(initialValue: isEnabled.wrappedValue)
         _draftPINHash = State(initialValue: pinHash.wrappedValue)
+        let initialTheme = AppThemeMode(rawValue: appThemeModeRaw.wrappedValue) ?? .system
+        _draftThemeModeRaw = State(initialValue: initialTheme.rawValue)
         _draftPINLength = State(initialValue: AppLockPINLengthStore.readLength() ?? 0)
     }
 
@@ -247,7 +282,7 @@ struct AppLockSettingsView: View {
         #if os(macOS)
         VStack(spacing: 0) {
             HStack {
-                Text("Security")
+                Text("Settings")
                     .font(.headline)
                 Spacer()
             }
@@ -273,7 +308,7 @@ struct AppLockSettingsView: View {
         #else
         NavigationStack {
             settingsForm
-                .navigationTitle("Security")
+                .navigationTitle("Settings")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") { dismiss() }
@@ -315,6 +350,15 @@ struct AppLockSettingsView: View {
                 .disabled(!canSavePIN)
             }
 
+            Section("Theme") {
+                Picker("Appearance", selection: $draftThemeModeRaw) {
+                    ForEach(AppThemeMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
             if let message {
                 Section {
                     Text(message)
@@ -344,6 +388,8 @@ struct AppLockSettingsView: View {
             }
             AppLockLockoutStore.clearState()
         }
+
+        appThemeModeRaw = AppThemeMode(rawValue: draftThemeModeRaw)?.rawValue ?? AppThemeMode.system.rawValue
         isEnabled = draftIsEnabled
         if !draftIsEnabled {
             AppLockLockoutStore.clearState()

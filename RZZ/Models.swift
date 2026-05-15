@@ -50,6 +50,22 @@ enum FeedProxyType: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum FeedProxySourceMode: String, CaseIterable, Codable, Identifiable {
+    case custom
+    case profile
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .custom:
+            return "Custom"
+        case .profile:
+            return "Saved Profile"
+        }
+    }
+}
+
 struct FeedProxyConfiguration {
     let type: FeedProxyType
     let host: String
@@ -68,6 +84,10 @@ final class Feed {
     var useProxy: Bool = false
     var useProxyForContent: Bool = false
     var allowInsecureHTTPForContent: Bool = false
+    var proxySourceModeRaw: String = FeedProxySourceMode.custom.rawValue
+    var contentProxySourceModeRaw: String = FeedProxySourceMode.custom.rawValue
+    var proxyProfileID: UUID? = nil
+    var contentProxyProfileID: UUID? = nil
     var proxyTypeRaw: String = FeedProxyType.http.rawValue
     var proxyHost: String = ""
     var proxyPort: Int? = nil
@@ -103,9 +123,23 @@ final class Feed {
         set { proxyTypeRaw = newValue.rawValue }
     }
 
+    var proxySourceMode: FeedProxySourceMode {
+        get { FeedProxySourceMode(rawValue: proxySourceModeRaw) ?? .custom }
+        set { proxySourceModeRaw = newValue.rawValue }
+    }
+
+    var contentProxySourceMode: FeedProxySourceMode {
+        get { FeedProxySourceMode(rawValue: contentProxySourceModeRaw) ?? .custom }
+        set { contentProxySourceModeRaw = newValue.rawValue }
+    }
+
     var offlinePolicy: FeedOfflinePolicy {
         get { FeedOfflinePolicy(rawValue: offlinePolicyRaw) ?? .off }
         set { offlinePolicyRaw = newValue.rawValue }
+    }
+
+    var customProxyConfiguration: FeedProxyConfiguration? {
+        makeProxyConfiguration()
     }
 
     var proxyConfiguration: FeedProxyConfiguration? {
@@ -183,6 +217,107 @@ final class Feed {
 
     private var proxyPasswordAccount: String {
         "feed-proxy-password.\(id.uuidString.lowercased())"
+    }
+}
+
+@Model
+final class ProxyProfile {
+    var id: UUID = UUID()
+    var name: String = ""
+    var proxyTypeRaw: String = FeedProxyType.http.rawValue
+    var proxyHost: String = ""
+    var proxyPort: Int? = nil
+    var proxyUsername: String = ""
+    var proxyPassword: String = ""
+    var createdAt: Date = Date()
+    var updatedAt: Date = Date()
+
+    init(
+        name: String,
+        proxyType: FeedProxyType,
+        proxyHost: String,
+        proxyPort: Int?,
+        proxyUsername: String
+    ) {
+        self.name = name
+        self.proxyTypeRaw = proxyType.rawValue
+        self.proxyHost = proxyHost
+        self.proxyPort = proxyPort
+        self.proxyUsername = proxyUsername
+        self.proxyPassword = ""
+        self.createdAt = Date()
+        self.updatedAt = Date()
+    }
+
+    var proxyType: FeedProxyType {
+        get { FeedProxyType(rawValue: proxyTypeRaw) ?? .http }
+        set { proxyTypeRaw = newValue.rawValue }
+    }
+
+    var proxyPasswordValue: String {
+        if let secure = SecureSecretStore.readPassword(forAccount: proxyPasswordAccount), !secure.isEmpty {
+            return secure
+        }
+        return proxyPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func migrateLegacyProxyPasswordIfNeeded() -> ProxyPasswordMigrationResult {
+        let legacy = proxyPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !legacy.isEmpty else { return .notNeeded }
+
+        if SecureSecretStore.readPassword(forAccount: proxyPasswordAccount) == nil {
+            guard SecureSecretStore.savePassword(legacy, forAccount: proxyPasswordAccount) else {
+                proxyPassword = ""
+                return .clearedWithoutMigration
+            }
+        }
+
+        proxyPassword = ""
+        return .migrated
+    }
+
+    var configuration: FeedProxyConfiguration? {
+        let host = proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else { return nil }
+        guard let port = proxyPort, (1...65535).contains(port) else { return nil }
+
+        let username = proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = proxyPasswordValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return FeedProxyConfiguration(
+            type: proxyType,
+            host: host,
+            port: port,
+            username: username.isEmpty ? nil : username,
+            password: password.isEmpty ? nil : password
+        )
+    }
+
+    @discardableResult
+    func setProxyPasswordSecurely(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.isEmpty {
+            SecureSecretStore.deletePassword(forAccount: proxyPasswordAccount)
+            proxyPassword = ""
+            return true
+        }
+
+        if SecureSecretStore.savePassword(trimmed, forAccount: proxyPasswordAccount) {
+            proxyPassword = ""
+            return true
+        }
+
+        return false
+    }
+
+    func clearSecureProxyPassword() {
+        SecureSecretStore.deletePassword(forAccount: proxyPasswordAccount)
+        proxyPassword = ""
+    }
+
+    private var proxyPasswordAccount: String {
+        "proxy-profile-password.\(id.uuidString.lowercased())"
     }
 }
 

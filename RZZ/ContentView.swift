@@ -3,6 +3,7 @@ import SwiftData
 import WebKit
 import UniformTypeIdentifiers
 import UserNotifications
+import os
 #if os(macOS)
 import AppKit
 #else
@@ -87,6 +88,10 @@ private struct FeedEditDraft: Identifiable {
     let useProxy: Bool
     let useProxyForContent: Bool
     let allowInsecureHTTPForContent: Bool
+    let proxySourceMode: FeedProxySourceMode
+    let contentProxySourceMode: FeedProxySourceMode
+    let proxyProfileID: UUID?
+    let contentProxyProfileID: UUID?
     let proxyType: FeedProxyType
     let proxyHost: String
     let proxyPort: Int?
@@ -103,6 +108,10 @@ private struct FeedFormValues {
     let useProxy: Bool
     let useProxyForContent: Bool
     let allowInsecureHTTPForContent: Bool
+    let proxySourceMode: FeedProxySourceMode
+    let contentProxySourceMode: FeedProxySourceMode
+    let proxyProfileID: UUID?
+    let contentProxyProfileID: UUID?
     let proxyType: FeedProxyType
     let proxyHost: String
     let proxyPort: Int?
@@ -110,6 +119,26 @@ private struct FeedFormValues {
     let proxyPassword: String
     let offlinePolicy: FeedOfflinePolicy
     let folderName: String
+}
+
+private struct ProxyProfileEditDraft: Identifiable {
+    let id = UUID()
+    let profileID: PersistentIdentifier?
+    let name: String
+    let proxyType: FeedProxyType
+    let proxyHost: String
+    let proxyPort: Int?
+    let proxyUsername: String
+    let proxyPassword: String
+}
+
+private struct ProxyProfileFormValues {
+    let name: String
+    let proxyType: FeedProxyType
+    let proxyHost: String
+    let proxyPort: Int?
+    let proxyUsername: String
+    let proxyPassword: String
 }
 
 private struct FeedDeletionRequest: Identifiable {
@@ -157,13 +186,92 @@ private struct OfflineCacheRequest {
     let allowInsecureHTTPContent: Bool
 }
 
+private enum PerformanceSampleKind: String {
+    case render = "Render"
+    case offlineWrite = "Offline Write"
+    case scrollBridge = "Scroll Bridge"
+    case progressCommit = "Progress Commit"
+    case mainThreadLag = "Main Thread Lag"
+    case articleListScroll = "Article List Scroll"
+    case articleListMainLag = "Article List Main Lag"
+}
+
+private struct PerformanceSample: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let kind: PerformanceSampleKind
+    let articleTitle: String
+    let detail: String
+    let durationMs: Double
+    let htmlBytes: Int?
+}
+
+private struct ScrollBridgeSnapshot {
+    let windowSeconds: Double
+    let rawEventCount: Int
+    let deliveredEventCount: Int
+    let droppedEventCount: Int
+    let averageDeliveredIntervalMs: Double
+}
+
+private struct FeedArticleGroup {
+    let feed: Feed
+    let articles: [Article]
+}
+
+private final class ReadingProgressBuffer {
+    var lastSavedProgress: Double = -1
+    var pendingProgress: Double = -1
+    var commitTask: Task<Void, Never>?
+    var lastPendingUpdateUptime: TimeInterval = 0
+
+    func reset(with progress: Double) {
+        lastSavedProgress = progress
+        pendingProgress = progress
+        lastPendingUpdateUptime = ProcessInfo.processInfo.systemUptime
+        commitTask?.cancel()
+        commitTask = nil
+    }
+}
+
+private final class ArticleListDiagnosticsBuffer {
+    var windowStartUptime: TimeInterval = 0
+    var rowAppearCount: Int = 0
+    var indexDeltaTotal: Int = 0
+    var indexDeltaSamples: Int = 0
+    var lastIndex: Int?
+    var activeUntilUptime: TimeInterval = 0
+    var programmaticScrollUntilUptime: TimeInterval = 0
+    var lagMonitorTask: Task<Void, Never>?
+}
+
+private enum SplitColumn: String, Hashable {
+    case sidebar
+    case articleList
+    case detail
+}
+
+private struct SplitColumnWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: [SplitColumn: CGFloat] = [:]
+
+    static func reduce(value: inout [SplitColumn: CGFloat], nextValue: () -> [SplitColumn: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
 struct ContentView: View {
     @Binding var isAppLocked: Bool
     @Binding var appLockPINHash: String
     @Environment(\.modelContext) private var modelContext
     @Query(sort: [SortDescriptor(\Feed.createdAt, order: .forward)]) private var feeds: [Feed]
-    @Query(sort: [SortDescriptor(\Article.publishedAt, order: .reverse), SortDescriptor(\Article.createdAt, order: .reverse)]) private var articles: [Article]
+    @Query(
+        filter: #Predicate<Article> { article in
+            article.feed == nil
+        },
+        sort: [SortDescriptor(\Article.createdAt, order: .reverse)]
+    ) private var orphanArticles: [Article]
     @Query(sort: [SortDescriptor(\Tag.name, order: .forward), SortDescriptor(\Tag.createdAt, order: .forward)]) private var tags: [Tag]
+    @Query(sort: [SortDescriptor(\ProxyProfile.createdAt, order: .forward), SortDescriptor(\ProxyProfile.updatedAt, order: .forward)]) private var proxyProfiles: [ProxyProfile]
     @AppStorage("app_lock_enabled") private var appLockEnabled = false
     @AppStorage("last_feed_scope_all") private var lastFeedScopeAll = true
     @AppStorage("last_selected_feed_uuids") private var lastSelectedFeedUUIDsCSV = ""
@@ -177,6 +285,13 @@ struct ContentView: View {
     @AppStorage("last_refresh_status_summary") private var lastRefreshStatusSummary = "Never refreshed"
     @AppStorage("last_refresh_status_at") private var lastRefreshStatusAt = 0.0
     @AppStorage("article_list_column_visible") private var articleListColumnVisible = true
+    @AppStorage("sidebar_column_ideal_width") private var sidebarColumnIdealWidth = 260.0
+    @AppStorage("article_list_column_ideal_width") private var articleListColumnIdealWidth = 320.0
+    @AppStorage("detail_column_ideal_width") private var detailColumnIdealWidth = 900.0
+    @AppStorage("did_migrate_custom_proxy_to_profiles_v1") private var didMigrateCustomProxyToProfiles = false
+    @AppStorage("debug_perf_diagnostics_enabled") private var debugPerfDiagnosticsEnabled = false
+    @AppStorage("menu_bar_hidden_mode_active") private var menuBarHiddenModeActive = false
+    @AppStorage("app_theme_mode") private var appThemeModeRaw = ""
 
     @State private var isAllFeedsSelected = true
     @State private var selectedFeedIDs: Set<PersistentIdentifier> = []
@@ -194,6 +309,7 @@ struct ContentView: View {
     @State private var showImportBackup = false
     @State private var showImportBackupConfirmation = false
     @State private var showTagManager = false
+    @State private var showProxyProfiles = false
     @State private var didRestorePersistedUIState = false
     @State private var transferMessage: String?
     @State private var exportBackupDocument = RZZBackupDocument()
@@ -218,6 +334,7 @@ struct ContentView: View {
     @State private var lastAddFeedStatusAt: TimeInterval = 0
     @State private var lastAddFeedDetails: [FeedRefreshDetail] = []
     @State private var didScheduleLaunchAutoRefresh = false
+    @State private var launchAutoRefreshTask: Task<Void, Never>?
     @State private var showCreateFolderSheet = false
     @State private var folderRenameDraft: FolderRenameDraft?
     @State private var collapsedFolderNames: Set<String> = []
@@ -228,9 +345,20 @@ struct ContentView: View {
     @State private var offlineCacheGeneration: Int = 0
     @State private var didMigrateLegacyProxySecrets = false
     @State private var exportBackupFilename = ""
+    @State private var showPerformanceDiagnostics = false
+    @State private var performanceSamples: [PerformanceSample] = []
+    @State private var articleListDiagnosticsBuffer = ArticleListDiagnosticsBuffer()
+    @State private var groupedDisplayedArticlesCache: [FeedArticleGroup] = []
 
     private let defaultFeedFolderName = "New Added"
     private let maxTagCount = 5
+    private let maxProxyProfileCount = 5
+    private let sidebarColumnMinWidth: CGFloat = 210
+    private let sidebarColumnMaxWidth: CGFloat = 420
+    private let articleListColumnMinWidth: CGFloat = 250
+    private let articleListColumnMaxWidth: CGFloat = 520
+    private let detailColumnMinWidth: CGFloat = 420
+    private let detailColumnMaxWidth: CGFloat = 2200
     private let backupTextSummaryCharacterLimit = 20_000
     private let backupImportMaxFileBytes = 80 * 1024 * 1024
     private let backupImportMaxFeeds = 500
@@ -252,14 +380,43 @@ struct ContentView: View {
     private let offlineMaxQueuedTasks = 96
     private let offlineMaxEnqueuePerBatch = 24
     private let offlineMaxHTMLBytes = 5_000_000
+    private let maxPerformanceSampleCount = 240
+    private let performanceLogger = Logger(subsystem: "sivaz.RZZ", category: "Performance")
 
     private var selectedTagFilter: Tag? {
         guard let uuid = UUID(uuidString: selectedTagFilterUUIDString) else { return nil }
         return tags.first(where: { $0.id == uuid })
     }
 
+    private var sortedProxyProfiles: [ProxyProfile] {
+        proxyProfiles.sorted { lhs, rhs in
+            if lhs.createdAt == rhs.createdAt {
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+            return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    private var groupedDisplayedArticles: [FeedArticleGroup] {
+        groupedDisplayedArticlesCache
+    }
+
     private var displayedArticles: [Article] {
-        groupedDisplayedArticles.flatMap(\.articles)
+        groupedDisplayedArticlesCache.flatMap(\.articles)
+    }
+
+    private var displayedArticleIndexMap: [PersistentIdentifier: Int] {
+        Dictionary(
+            uniqueKeysWithValues: displayedArticles.enumerated().map { ($1.persistentModelID, $0) }
+        )
+    }
+
+    private var allArticlesSnapshot: [Article] {
+        feeds.flatMap(\.articles)
+    }
+
+    private var allArticlePersistentIDsSnapshot: [PersistentIdentifier] {
+        allArticlesSnapshot.map(\.persistentModelID)
     }
 
     private var effectiveSelectedFeedIDs: Set<PersistentIdentifier>? {
@@ -310,31 +467,20 @@ struct ContentView: View {
         return feeds.filter { selectedFeedIDs.contains($0.persistentModelID) }
     }
 
-    private var groupedDisplayedArticles: [(feed: Feed, articles: [Article])] {
-        orderedActiveFeeds.compactMap { feed in
-            var items = feed.articles
-            if articleFilter == .starred {
-                items = items.filter(\.isStarred)
-            }
-            if let selectedTagFilter {
-                let selectedTagID = selectedTagFilter.persistentModelID
-                items = items.filter { article in
-                    article.tags.contains(where: { $0.persistentModelID == selectedTagID })
-                }
-            }
-            items.sort { lhs, rhs in
-                (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
-            }
-            return items.isEmpty ? nil : (feed, items)
-        }
-    }
-
     private var shouldGroupArticleListByFeed: Bool {
         isAllFeedsSelected || selectedFeeds.count > 1
     }
 
     private var hasCustomFeedSelection: Bool {
         !isAllFeedsSelected && !selectedFeedIDs.isEmpty
+    }
+
+    private var shouldPauseBackgroundWorkForMenuBar: Bool {
+        #if os(macOS)
+        return menuBarHiddenModeActive
+        #else
+        return false
+        #endif
     }
 
     private var feedScopeSummary: String {
@@ -390,8 +536,7 @@ struct ContentView: View {
 
     private var selectedArticle: Article? {
         guard let selectedArticleID else { return nil }
-        guard displayedArticles.contains(where: { $0.persistentModelID == selectedArticleID }) else { return nil }
-        return articles.first(where: { $0.persistentModelID == selectedArticleID })
+        return article(forPersistentID: selectedArticleID)
     }
 
     var body: some View {
@@ -401,16 +546,36 @@ struct ContentView: View {
     private var baseLayout: some View {
         VStack(spacing: 0) {
             NavigationSplitView {
-                sidebarPane
+                sidebarColumn
             } content: {
                 articleListColumn
             } detail: {
-                articleDetailPane
+                detailColumn
+            }
+            .onPreferenceChange(SplitColumnWidthPreferenceKey.self) { widths in
+                persistMeasuredSplitColumnWidths(widths)
             }
 
             Divider()
             scopeStatusBar
         }
+    }
+
+    private var sidebarColumn: some View {
+        sidebarPane
+            .navigationSplitViewColumnWidth(
+                min: sidebarColumnMinWidth,
+                ideal: CGFloat(sidebarColumnIdealWidth),
+                max: sidebarColumnMaxWidth
+            )
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: SplitColumnWidthPreferenceKey.self,
+                        value: [.sidebar: proxy.size.width]
+                    )
+                }
+            )
     }
 
     private var articleListColumn: some View {
@@ -419,14 +584,39 @@ struct ContentView: View {
         .allowsHitTesting(articleListColumnVisible)
         .accessibilityHidden(!articleListColumnVisible)
         .navigationSplitViewColumnWidth(
-            min: articleListColumnVisible ? 250 : 0,
-            ideal: articleListColumnVisible ? 320 : 1,
-            max: articleListColumnVisible ? 400 : 1
+            min: articleListColumnVisible ? articleListColumnMinWidth : 0,
+            ideal: articleListColumnVisible ? CGFloat(articleListColumnIdealWidth) : 1,
+            max: articleListColumnVisible ? articleListColumnMaxWidth : 1
+        )
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: SplitColumnWidthPreferenceKey.self,
+                    value: [.articleList: proxy.size.width]
+                )
+            }
         )
         .animation(
             .interactiveSpring(response: 0.34, dampingFraction: 0.9, blendDuration: 0.12),
             value: articleListColumnVisible
         )
+    }
+
+    private var detailColumn: some View {
+        articleDetailPane
+            .navigationSplitViewColumnWidth(
+                min: detailColumnMinWidth,
+                ideal: CGFloat(detailColumnIdealWidth),
+                max: detailColumnMaxWidth
+            )
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: SplitColumnWidthPreferenceKey.self,
+                        value: [.detail: proxy.size.width]
+                    )
+                }
+            )
     }
 
     private var bodyWithToolbar: some View {
@@ -484,11 +674,42 @@ struct ContentView: View {
 
                     Button {
                         guard !shouldShowLockScreen else { return }
-                        showSecuritySettings = true
+                        showProxyProfiles = true
                     } label: {
-                        Label("Security", systemImage: "lock")
+                        Label("Proxy Profiles", systemImage: "network.badge.shield.half.filled")
                     }
                     .disabled(shouldShowLockScreen)
+
+                    Button {
+                        guard !shouldShowLockScreen else { return }
+                        showSecuritySettings = true
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+                    .help("Open app settings")
+                    .disabled(shouldShowLockScreen)
+
+                    #if DEBUG
+                    Menu {
+                        Toggle(isOn: $debugPerfDiagnosticsEnabled) {
+                            Label("Enable Diagnostics", systemImage: "waveform.path.ecg")
+                        }
+                        Button {
+                            guard !shouldShowLockScreen else { return }
+                            showPerformanceDiagnostics = true
+                        } label: {
+                            Label("View Diagnostics", systemImage: "list.bullet.rectangle")
+                        }
+                        Button(role: .destructive) {
+                            clearPerformanceSamples()
+                        } label: {
+                            Label("Clear Diagnostics", systemImage: "trash")
+                        }
+                    } label: {
+                        Label("Diagnostics", systemImage: "waveform.path.ecg.rectangle")
+                    }
+                    .disabled(shouldShowLockScreen)
+                    #endif
 
                     Menu {
                         Button {
@@ -550,11 +771,15 @@ struct ContentView: View {
 
     private var bodyWithSelectionObservers: some View {
         bodyWithToolbar
-            .onChange(of: articles.map(\.persistentModelID)) { _, newIDs in
+            .onChange(of: allArticlePersistentIDsSnapshot) { _, newIDs in
                 if let selectedArticleID, !newIDs.contains(selectedArticleID) {
                     self.selectedArticleID = nil
                 }
-                restorePersistedUIStateIfNeeded()
+                if didRestorePersistedUIState {
+                    rebuildDisplayedArticleGroups()
+                } else {
+                    restorePersistedUIStateIfNeeded()
+                }
             }
             .onChange(of: feeds.map(\.persistentModelID)) { _, newFeedIDs in
                 selectedFeedIDs = selectedFeedIDs.intersection(Set(newFeedIDs))
@@ -562,13 +787,13 @@ struct ContentView: View {
                     isAllFeedsSelected = true
                 }
                 migrateLegacyProxySecretsIfNeeded()
-                restorePersistedUIStateIfNeeded()
-                scheduleLaunchAutoRefreshIfNeeded()
-            }
-            .onChange(of: displayedArticles.map(\.persistentModelID)) { _, visibleArticleIDs in
-                if let selectedArticleID, !visibleArticleIDs.contains(selectedArticleID) {
-                    self.selectedArticleID = nil
+                migrateLegacyCustomProxiesToProfilesIfNeeded()
+                if didRestorePersistedUIState {
+                    rebuildDisplayedArticleGroups()
+                } else {
+                    restorePersistedUIStateIfNeeded()
                 }
+                scheduleLaunchAutoRefreshIfNeeded()
             }
             .onChange(of: tags.map(\.persistentModelID)) { _, newTagIDs in
                 if let selectedTagFilter,
@@ -578,22 +803,31 @@ struct ContentView: View {
             }
             .onChange(of: isAllFeedsSelected) { _, _ in
                 persistFeedScopeSelection()
+                rebuildDisplayedArticleGroups()
             }
             .onChange(of: selectedFeedIDs) { _, _ in
                 persistFeedScopeSelection()
+                rebuildDisplayedArticleGroups()
             }
             .onChange(of: selectedTagFilterUUIDString) { _, newValue in
                 lastSelectedTagUUIDString = newValue
                 handleArticleSelectionAfterFilterChange()
+                rebuildDisplayedArticleGroups()
             }
             .onChange(of: articleFilter) { _, _ in
                 persistArticleFilterSelection()
                 handleArticleSelectionAfterFilterChange()
+                rebuildDisplayedArticleGroups()
+            }
+            .onChange(of: menuBarHiddenModeActive) { _, isHiddenToMenuBar in
+                handleMenuBarHiddenModeChanged(isHiddenToMenuBar)
             }
             .onAppear {
                 migrateLegacyProxySecretsIfNeeded()
+                migrateLegacyCustomProxiesToProfilesIfNeeded()
                 restorePersistedUIStateIfNeeded()
                 selectedTagFilterUUIDString = lastSelectedTagUUIDString
+                rebuildDisplayedArticleGroups()
                 scheduleLaunchAutoRefreshIfNeeded()
             }
     }
@@ -607,6 +841,19 @@ struct ContentView: View {
                     onCreate: createTag(named:),
                     onRename: renameTag(_:to:),
                     onDelete: deleteTag(_:)
+                )
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
+            .sheet(isPresented: $showProxyProfiles) {
+                ProxyProfilesManagerView(
+                    profiles: sortedProxyProfiles,
+                    maxProfileCount: maxProxyProfileCount,
+                    profileUsageCount: proxyProfileUsageCount(_:),
+                    onCreate: createProxyProfile(values:),
+                    onUpdate: updateProxyProfile(profileID:values:),
+                    onDelete: deleteProxyProfile(profileID:)
                 )
                 #if os(macOS)
                 .presentationSizing(.fitted)
@@ -641,6 +888,10 @@ struct ContentView: View {
                     initialUseProxy: false,
                     initialUseProxyForContent: false,
                     initialAllowInsecureHTTPForContent: false,
+                    initialProxySourceMode: .custom,
+                    initialContentProxySourceMode: .custom,
+                    initialProxyProfileID: nil,
+                    initialContentProxyProfileID: nil,
                     initialProxyType: .http,
                     initialProxyHost: "",
                     initialProxyPort: nil,
@@ -648,7 +899,9 @@ struct ContentView: View {
                     initialProxyPassword: "",
                     initialOfflinePolicy: .off,
                     initialFolderName: defaultFeedFolderName,
-                    availableFolderNames: allFolderNames
+                    availableFolderNames: allFolderNames,
+                    proxyProfiles: sortedProxyProfiles,
+                    maxProxyProfileCount: maxProxyProfileCount
                 ) { values in
                     Task {
                         await addFeed(values: values)
@@ -667,6 +920,10 @@ struct ContentView: View {
                     initialUseProxy: draft.useProxy,
                     initialUseProxyForContent: draft.useProxyForContent,
                     initialAllowInsecureHTTPForContent: draft.allowInsecureHTTPForContent,
+                    initialProxySourceMode: draft.proxySourceMode,
+                    initialContentProxySourceMode: draft.contentProxySourceMode,
+                    initialProxyProfileID: draft.proxyProfileID,
+                    initialContentProxyProfileID: draft.contentProxyProfileID,
                     initialProxyType: draft.proxyType,
                     initialProxyHost: draft.proxyHost,
                     initialProxyPort: draft.proxyPort,
@@ -674,7 +931,9 @@ struct ContentView: View {
                     initialProxyPassword: draft.proxyPassword,
                     initialOfflinePolicy: draft.offlinePolicy,
                     initialFolderName: draft.folderName,
-                    availableFolderNames: allFolderNames
+                    availableFolderNames: allFolderNames,
+                    proxyProfiles: sortedProxyProfiles,
+                    maxProxyProfileCount: maxProxyProfileCount
                 ) { values in
                     Task {
                         await updateFeed(feedID: draft.feedID, values: values)
@@ -687,7 +946,8 @@ struct ContentView: View {
             .sheet(isPresented: $showSecuritySettings) {
                 AppLockSettingsView(
                     isEnabled: $appLockEnabled,
-                    pinHash: $appLockPINHash
+                    pinHash: $appLockPINHash,
+                    appThemeModeRaw: $appThemeModeRaw
                 )
                 #if os(macOS)
                 .presentationSizing(.fitted)
@@ -705,6 +965,18 @@ struct ContentView: View {
                 .presentationSizing(.fitted)
                 #endif
             }
+            #if DEBUG
+            .sheet(isPresented: $showPerformanceDiagnostics) {
+                PerformanceDiagnosticsView(
+                    isEnabled: $debugPerfDiagnosticsEnabled,
+                    samples: performanceSamples,
+                    onClear: clearPerformanceSamples
+                )
+                #if os(macOS)
+                .presentationSizing(.fitted)
+                #endif
+            }
+            #endif
             .sheet(isPresented: $showRefreshDetails) {
                 RefreshDetailsView(
                     title: lastRefreshDetailTitle,
@@ -1080,12 +1352,20 @@ struct ContentView: View {
                     }
                     .navigationTitle(navigationTitle)
                     .onAppear {
+                        startArticleListLagMonitorIfNeeded()
                         scrollSelectedArticleIntoView(using: scrollProxy)
+                    }
+                    .onDisappear {
+                        stopArticleListLagMonitor()
+                    }
+                    .onChange(of: debugPerfDiagnosticsEnabled) { _, isEnabled in
+                        if isEnabled {
+                            startArticleListLagMonitorIfNeeded()
+                        } else {
+                            stopArticleListLagMonitor()
+                        }
                     }
                     .onChange(of: articleFilter) { _, _ in
-                        scrollSelectedArticleIntoView(using: scrollProxy)
-                    }
-                    .onChange(of: displayedArticles.map(\.persistentModelID)) { _, _ in
                         scrollSelectedArticleIntoView(using: scrollProxy)
                     }
                     .onChange(of: articleListFocusRequest?.token) { _, _ in
@@ -1094,7 +1374,7 @@ struct ContentView: View {
                     }
                     .onChange(of: selectedArticleID) { _, newSelection in
                     if let newSelection,
-                       let article = articles.first(where: { $0.persistentModelID == newSelection }) {
+                       let article = article(forPersistentID: newSelection) {
                         lastSelectedArticleUUIDString = article.id.uuidString
                         persistArticleSelectionForCurrentFilter(articleID: article.id)
                     } else {
@@ -1102,7 +1382,7 @@ struct ContentView: View {
                     }
 
                         guard let newSelection else { return }
-                        guard let article = articles.first(where: { $0.persistentModelID == newSelection }) else { return }
+                        guard let article = article(forPersistentID: newSelection) else { return }
                         if !article.isRead {
                             article.isRead = true
                         }
@@ -1132,6 +1412,9 @@ struct ContentView: View {
                 }
                 Button {
                     article.isStarred.toggle()
+                    if articleFilter == .starred {
+                        rebuildDisplayedArticleGroups()
+                    }
                 } label: {
                     Label(
                         article.isStarred ? "Unstar" : "Star",
@@ -1160,8 +1443,7 @@ struct ContentView: View {
 
     private var activeFeedStats: (feedTitle: String, readCount: Int, unreadCount: Int, allCount: Int)? {
         guard let feed = selectedArticle?.feed else { return nil }
-        let feedID = feed.persistentModelID
-        let feedArticles = articles.filter { $0.feed?.persistentModelID == feedID }
+        let feedArticles = feed.articles
         guard !feedArticles.isEmpty else { return nil }
 
         let readCount = feedArticles.filter(\.isRead).count
@@ -1296,6 +1578,28 @@ struct ContentView: View {
                         .lineLimit(1)
                 }
             }
+
+            #if DEBUG
+            if debugPerfDiagnosticsEnabled {
+                Divider()
+                    .frame(height: 14)
+                Button {
+                    showPerformanceDiagnostics = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "waveform.path.ecg")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text("Perf \(performanceSamples.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Open performance diagnostics")
+            }
+            #endif
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -1346,6 +1650,81 @@ struct ContentView: View {
         }
     }
 
+    private func clearPerformanceSamples() {
+        performanceSamples.removeAll(keepingCapacity: false)
+        articleListDiagnosticsBuffer.windowStartUptime = 0
+        articleListDiagnosticsBuffer.rowAppearCount = 0
+        articleListDiagnosticsBuffer.indexDeltaTotal = 0
+        articleListDiagnosticsBuffer.indexDeltaSamples = 0
+        articleListDiagnosticsBuffer.lastIndex = nil
+        articleListDiagnosticsBuffer.activeUntilUptime = 0
+        articleListDiagnosticsBuffer.programmaticScrollUntilUptime = 0
+    }
+
+    private func recordPerformanceSample(_ sample: PerformanceSample) {
+        #if DEBUG
+        guard debugPerfDiagnosticsEnabled else { return }
+        var updated = performanceSamples
+        updated.insert(sample, at: 0)
+        if updated.count > maxPerformanceSampleCount {
+            updated = Array(updated.prefix(maxPerformanceSampleCount))
+        }
+        performanceSamples = updated
+
+        let bytesText: String
+        if let htmlBytes = sample.htmlBytes {
+            bytesText = " bytes=\(htmlBytes)"
+        } else {
+            bytesText = ""
+        }
+        performanceLogger.log(
+            "\(sample.kind.rawValue, privacy: .public) ms=\(sample.durationMs, format: .fixed(precision: 2), privacy: .public)\(bytesText, privacy: .public) detail=\(sample.detail, privacy: .public) title=\(sample.articleTitle, privacy: .public)"
+        )
+        #endif
+    }
+
+    private func persistMeasuredSplitColumnWidths(_ widths: [SplitColumn: CGFloat]) {
+        if let sidebar = widths[.sidebar] {
+            persistColumnWidth(
+                sidebar,
+                stored: &sidebarColumnIdealWidth,
+                minWidth: sidebarColumnMinWidth,
+                maxWidth: sidebarColumnMaxWidth
+            )
+        }
+
+        if articleListColumnVisible, let articleList = widths[.articleList] {
+            persistColumnWidth(
+                articleList,
+                stored: &articleListColumnIdealWidth,
+                minWidth: articleListColumnMinWidth,
+                maxWidth: articleListColumnMaxWidth
+            )
+        }
+
+        if let detail = widths[.detail] {
+            persistColumnWidth(
+                detail,
+                stored: &detailColumnIdealWidth,
+                minWidth: detailColumnMinWidth,
+                maxWidth: detailColumnMaxWidth
+            )
+        }
+    }
+
+    private func persistColumnWidth(
+        _ measured: CGFloat,
+        stored: inout Double,
+        minWidth: CGFloat,
+        maxWidth: CGFloat
+    ) {
+        guard measured.isFinite, measured > 1 else { return }
+        let clamped = Swift.max(Swift.min(measured, maxWidth), minWidth)
+        if abs(Double(clamped) - stored) >= 2 {
+            stored = Double(clamped)
+        }
+    }
+
     private var addFeedStatusColor: Color {
         switch lastAddFeedStatusStyle {
         case .info:
@@ -1374,11 +1753,21 @@ struct ContentView: View {
                 ArticleDetailView(
                     article: selectedArticle,
                     tags: tags,
+                    isPerformanceDiagnosticsEnabled: debugPerfDiagnosticsEnabled,
+                    contentProxyResolver: { feed in
+                        resolvedContentProxy(for: feed)
+                    },
                     onToggleTag: toggleTag(_:for:),
+                    onToggleStar: {
+                        if articleFilter == .starred {
+                            rebuildDisplayedArticleGroups()
+                        }
+                    },
                     onOpenTagManager: { showTagManager = true },
                     onRetryOfflineCaching: {
                         retryOfflineCaching(for: selectedArticle)
-                    }
+                    },
+                    onPerformanceSample: recordPerformanceSample(_:)
                 )
             } else {
                 ContentUnavailableView(
@@ -1410,11 +1799,58 @@ struct ContentView: View {
         return selectedFeeds.first
     }
 
+    private func article(forPersistentID id: PersistentIdentifier) -> Article? {
+        for feed in feeds {
+            if let match = feed.articles.first(where: { $0.persistentModelID == id }) {
+                return match
+            }
+        }
+        return orphanArticles.first(where: { $0.persistentModelID == id })
+    }
+
+    private func article(forUUID uuid: UUID) -> Article? {
+        for feed in feeds {
+            if let match = feed.articles.first(where: { $0.id == uuid }) {
+                return match
+            }
+        }
+        return orphanArticles.first(where: { $0.id == uuid })
+    }
+
+    private func rebuildDisplayedArticleGroups() {
+        let selectedTagID = selectedTagFilter?.persistentModelID
+        let groups = orderedActiveFeeds.compactMap { feed -> FeedArticleGroup? in
+            var items = feed.articles
+            if articleFilter == .starred {
+                items = items.filter(\.isStarred)
+            }
+            if let selectedTagID {
+                items = items.filter { article in
+                    article.tags.contains(where: { $0.persistentModelID == selectedTagID })
+                }
+            }
+            items.sort { lhs, rhs in
+                (lhs.publishedAt ?? lhs.createdAt) > (rhs.publishedAt ?? rhs.createdAt)
+            }
+            guard !items.isEmpty else { return nil }
+            return FeedArticleGroup(feed: feed, articles: items)
+        }
+
+        groupedDisplayedArticlesCache = groups
+
+        if let selectedArticleID,
+           !groups.contains(where: { group in
+               group.articles.contains(where: { $0.persistentModelID == selectedArticleID })
+           }) {
+            self.selectedArticleID = nil
+        }
+    }
+
     private func restoreLastSelectedArticleIfPossible() {
         guard selectedArticleID == nil else { return }
         let candidate = selectedArticleUUIDForCurrentFilter()
         guard let uuid = UUID(uuidString: candidate) else { return }
-        guard let article = articles.first(where: { $0.id == uuid }) else { return }
+        guard let article = article(forUUID: uuid) else { return }
         guard displayedArticles.contains(where: { $0.persistentModelID == article.persistentModelID }) else { return }
         selectedArticleID = article.persistentModelID
     }
@@ -1425,6 +1861,7 @@ struct ContentView: View {
 
         restoreArticleFilterSelectionIfPossible()
         restoreFeedScopeSelectionIfPossible()
+        rebuildDisplayedArticleGroups()
         restoreLastSelectedArticleIfPossible()
         didRestorePersistedUIState = true
     }
@@ -1528,34 +1965,108 @@ struct ContentView: View {
         }
     }
 
+    private func recordArticleListRowAppearance(articleID: PersistentIdentifier) {
+        #if DEBUG
+        guard debugPerfDiagnosticsEnabled else { return }
+        guard let index = displayedArticleIndexMap[articleID] else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let buffer = articleListDiagnosticsBuffer
+
+        if buffer.windowStartUptime <= 0 {
+            buffer.windowStartUptime = now
+        }
+
+        buffer.rowAppearCount += 1
+        if let lastIndex = buffer.lastIndex {
+            buffer.indexDeltaTotal += abs(index - lastIndex)
+            buffer.indexDeltaSamples += 1
+        }
+        buffer.lastIndex = index
+        buffer.activeUntilUptime = now + 0.9
+
+        let window = now - buffer.windowStartUptime
+        guard window >= 2.2 else { return }
+
+        let rate = Double(buffer.rowAppearCount) / max(window, 0.001)
+        let avgIntervalMs = buffer.rowAppearCount > 0
+            ? (window * 1000.0 / Double(buffer.rowAppearCount))
+            : 0
+        let avgIndexDelta = buffer.indexDeltaSamples > 0
+            ? (Double(buffer.indexDeltaTotal) / Double(buffer.indexDeltaSamples))
+            : 0
+        let scrollSource = now <= buffer.programmaticScrollUntilUptime ? "programmatic" : "user"
+
+        recordPerformanceSample(
+            PerformanceSample(
+                timestamp: Date(),
+                kind: .articleListScroll,
+                articleTitle: navigationTitle,
+                detail: "\(scrollSource) rows \(buffer.rowAppearCount), rate \(String(format: "%.1f", rate))/s, avg index delta \(String(format: "%.2f", avgIndexDelta))",
+                durationMs: avgIntervalMs,
+                htmlBytes: nil
+            )
+        )
+
+        buffer.windowStartUptime = now
+        buffer.rowAppearCount = 0
+        buffer.indexDeltaTotal = 0
+        buffer.indexDeltaSamples = 0
+        buffer.lastIndex = index
+        #endif
+    }
+
+    private func startArticleListLagMonitorIfNeeded() {
+        #if DEBUG
+        guard debugPerfDiagnosticsEnabled else { return }
+        stopArticleListLagMonitor()
+        articleListDiagnosticsBuffer.lagMonitorTask = Task(priority: .utility) {
+            while !Task.isCancelled {
+                let now = ProcessInfo.processInfo.systemUptime
+                if now <= articleListDiagnosticsBuffer.activeUntilUptime {
+                    let enqueueUptime = ProcessInfo.processInfo.systemUptime
+                    await MainActor.run {
+                        let lagMs = max((ProcessInfo.processInfo.systemUptime - enqueueUptime) * 1000, 0)
+                        guard lagMs >= 24 else { return }
+                        let source = ProcessInfo.processInfo.systemUptime <= articleListDiagnosticsBuffer.programmaticScrollUntilUptime
+                            ? "programmatic"
+                            : "user"
+                        recordPerformanceSample(
+                            PerformanceSample(
+                                timestamp: Date(),
+                                kind: .articleListMainLag,
+                                articleTitle: navigationTitle,
+                                detail: "Main-thread hop while article list \(source) scroll active",
+                                durationMs: lagMs,
+                                htmlBytes: nil
+                            )
+                        )
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 420_000_000)
+            }
+        }
+        #endif
+    }
+
+    private func stopArticleListLagMonitor() {
+        articleListDiagnosticsBuffer.lagMonitorTask?.cancel()
+        articleListDiagnosticsBuffer.lagMonitorTask = nil
+    }
+
     private func scrollSelectedArticleIntoView(using proxy: ScrollViewProxy) {
         guard let selectedArticleID else { return }
         guard displayedArticles.contains(where: { $0.persistentModelID == selectedArticleID }) else { return }
 
-        let targetID = selectedArticleID
-        let delays: [Double] = [0, 0.05, 0.12, 0.24]
-
-        for delay in delays {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard self.selectedArticleID == targetID else { return }
-                guard self.displayedArticles.contains(where: { $0.persistentModelID == targetID }) else { return }
-                proxy.scrollTo(targetID, anchor: .center)
-            }
-        }
+        articleListDiagnosticsBuffer.programmaticScrollUntilUptime = ProcessInfo.processInfo.systemUptime + 0.45
+        proxy.scrollTo(selectedArticleID, anchor: .center)
     }
 
     private func scrollArticleIntoTop(using proxy: ScrollViewProxy, articleID: PersistentIdentifier) {
         guard displayedArticles.contains(where: { $0.persistentModelID == articleID }) else { return }
 
-        let targetID = articleID
-        let delays: [Double] = [0, 0.05, 0.12, 0.24]
-
-        for delay in delays {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                guard self.displayedArticles.contains(where: { $0.persistentModelID == targetID }) else { return }
-                proxy.scrollTo(targetID, anchor: .top)
-            }
-        }
+        articleListDiagnosticsBuffer.programmaticScrollUntilUptime = ProcessInfo.processInfo.systemUptime + 0.45
+        proxy.scrollTo(articleID, anchor: .top)
     }
 
     @MainActor
@@ -1706,11 +2217,16 @@ struct ContentView: View {
         let previousFetchSignature = FeedFetchSignature(
             urlString: feed.urlString,
             useProxy: feed.useProxy,
+            proxySourceMode: feed.proxySourceMode,
+            proxyProfileID: feed.proxyProfileID,
             proxyType: feed.proxyType,
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
-            proxyPassword: feed.proxyPasswordValue
+            proxyPassword: feed.proxyPasswordValue,
+            useProxyForContent: feed.useProxyForContent,
+            contentProxySourceMode: feed.contentProxySourceMode,
+            contentProxyProfileID: feed.contentProxyProfileID
         )
 
         let trimmedTitle = values.title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1727,11 +2243,16 @@ struct ContentView: View {
         let updatedFetchSignature = FeedFetchSignature(
             urlString: feed.urlString,
             useProxy: feed.useProxy,
+            proxySourceMode: feed.proxySourceMode,
+            proxyProfileID: feed.proxyProfileID,
             proxyType: feed.proxyType,
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
             proxyUsername: feed.proxyUsername,
-            proxyPassword: feed.proxyPasswordValue
+            proxyPassword: feed.proxyPasswordValue,
+            useProxyForContent: feed.useProxyForContent,
+            contentProxySourceMode: feed.contentProxySourceMode,
+            contentProxyProfileID: feed.contentProxyProfileID
         )
 
         try? modelContext.save()
@@ -1820,11 +2341,17 @@ struct ContentView: View {
         guard autoRefreshOnLaunch else { return }
         guard !didScheduleLaunchAutoRefresh else { return }
         guard !feeds.isEmpty else { return }
+        guard !shouldPauseBackgroundWorkForMenuBar else { return }
 
         didScheduleLaunchAutoRefresh = true
-        Task {
+        launchAutoRefreshTask?.cancel()
+        launchAutoRefreshTask = Task {
             try? await Task.sleep(nanoseconds: launchAutoRefreshDelayNanoseconds)
+            guard !Task.isCancelled else { return }
             await performLaunchAutoRefreshIfNeeded()
+            await MainActor.run {
+                launchAutoRefreshTask = nil
+            }
         }
     }
 
@@ -1832,6 +2359,11 @@ struct ContentView: View {
     private func performLaunchAutoRefreshIfNeeded() async {
         guard autoRefreshOnLaunch else { return }
         guard !feeds.isEmpty else { return }
+        guard !shouldPauseBackgroundWorkForMenuBar else {
+            didScheduleLaunchAutoRefresh = false
+            finishLaunchRefreshStatus("Auto refresh paused while hidden", style: .info)
+            return
+        }
 
         let staleFeeds = feeds.filter { feed in
             guard let lastFetchedAt = feed.lastFetchedAt else { return true }
@@ -1858,6 +2390,11 @@ struct ContentView: View {
         var details: [FeedRefreshDetail] = []
 
         for (index, feed) in orderedFeeds.enumerated() {
+            if shouldPauseBackgroundWorkForMenuBar {
+                didScheduleLaunchAutoRefresh = false
+                finishLaunchRefreshStatus("Auto refresh paused while hidden", style: .info)
+                return
+            }
             let outcome = await refreshSingleFeed(feed, showGlobalSpinner: false)
             details.append(makeRefreshDetail(feed: feed, outcome: outcome))
             switch outcome {
@@ -1928,6 +2465,22 @@ struct ContentView: View {
                 )
             )
         }
+    }
+
+    @MainActor
+    private func handleMenuBarHiddenModeChanged(_ isHiddenToMenuBar: Bool) {
+        if isHiddenToMenuBar {
+            launchAutoRefreshTask?.cancel()
+            launchAutoRefreshTask = nil
+            didScheduleLaunchAutoRefresh = false
+            if launchRefreshIsRunning {
+                finishLaunchRefreshStatus("Auto refresh paused while hidden", style: .info)
+            }
+            return
+        }
+
+        scheduleLaunchAutoRefreshIfNeeded()
+        pumpOfflineCachingQueueIfPossible()
     }
 
     @MainActor
@@ -2039,7 +2592,7 @@ struct ContentView: View {
         }
 
         do {
-            let parsedFeed = try await RSSService.fetchFeed(from: url, proxy: feed.proxyConfiguration)
+            let parsedFeed = try await RSSService.fetchFeed(from: url, proxy: resolvedFeedFetchProxy(for: feed))
             let fetchedTitle = parsedFeed.title.trimmingCharacters(in: .whitespacesAndNewlines)
             if !feed.isTitleManuallySet, !fetchedTitle.isEmpty {
                 feed.title = fetchedTitle
@@ -2200,6 +2753,10 @@ struct ContentView: View {
             useProxy: feed.useProxy,
             useProxyForContent: feed.useProxyForContent,
             allowInsecureHTTPForContent: feed.allowInsecureHTTPForContent,
+            proxySourceMode: feed.proxySourceMode,
+            contentProxySourceMode: feed.contentProxySourceMode,
+            proxyProfileID: feed.proxyProfileID,
+            contentProxyProfileID: feed.contentProxyProfileID,
             proxyType: feed.proxyType,
             proxyHost: feed.proxyHost,
             proxyPort: feed.proxyPort,
@@ -2220,6 +2777,10 @@ struct ContentView: View {
         feed.useProxy = values.useProxy
         feed.useProxyForContent = values.useProxyForContent
         feed.allowInsecureHTTPForContent = values.allowInsecureHTTPForContent
+        feed.proxySourceMode = values.proxySourceMode
+        feed.contentProxySourceMode = values.contentProxySourceMode
+        feed.proxyProfileID = values.proxySourceMode == .profile ? values.proxyProfileID : nil
+        feed.contentProxyProfileID = values.contentProxySourceMode == .profile ? values.contentProxyProfileID : nil
         feed.proxyType = values.proxyType
         feed.proxyHost = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
         feed.proxyPort = values.proxyPort
@@ -2245,6 +2806,18 @@ struct ContentView: View {
             }
         }
 
+        for profile in proxyProfiles {
+            switch profile.migrateLegacyProxyPasswordIfNeeded() {
+            case .notNeeded:
+                break
+            case .migrated:
+                migratedAny = true
+            case .clearedWithoutMigration:
+                migratedAny = true
+                clearedWithoutMigration += 1
+            }
+        }
+
         if migratedAny {
             try? modelContext.save()
         }
@@ -2254,23 +2827,178 @@ struct ContentView: View {
         didMigrateLegacyProxySecrets = true
     }
 
+    private func migrateLegacyCustomProxiesToProfilesIfNeeded() {
+        guard !didMigrateCustomProxyToProfiles else { return }
+        guard !feeds.isEmpty else { return }
+
+        var signatureToProfile: [ProxyProfileSignature: ProxyProfile] = [:]
+        for profile in proxyProfiles {
+            if let signature = proxyProfileSignature(from: profile) {
+                signatureToProfile[signature] = profile
+            }
+        }
+
+        var usedLowercasedNames = Set(proxyProfiles.map { $0.name.lowercased() })
+        var profileCount = proxyProfiles.count
+        var didChange = false
+        var failedCount = 0
+
+        for feed in feeds {
+            let migrateFeedPath = feed.useProxy && feed.proxySourceMode == .custom
+            let migrateContentPath = feed.useProxyForContent && feed.contentProxySourceMode == .custom
+            guard migrateFeedPath || migrateContentPath else { continue }
+
+            guard let signature = customProxySignature(from: feed) else {
+                failedCount += 1
+                continue
+            }
+
+            let profile: ProxyProfile
+            if let existing = signatureToProfile[signature] {
+                profile = existing
+            } else {
+                guard profileCount < maxProxyProfileCount else {
+                    failedCount += 1
+                    continue
+                }
+
+                let generatedName = uniqueMigratedProxyProfileName(usedLowercasedNames: &usedLowercasedNames)
+                let created = ProxyProfile(
+                    name: generatedName,
+                    proxyType: signature.type,
+                    proxyHost: signature.host,
+                    proxyPort: signature.port,
+                    proxyUsername: signature.username
+                )
+                guard created.setProxyPasswordSecurely(signature.password) else {
+                    failedCount += 1
+                    continue
+                }
+                created.updatedAt = Date()
+                modelContext.insert(created)
+                signatureToProfile[signature] = created
+                profile = created
+                profileCount += 1
+                didChange = true
+            }
+
+            if migrateFeedPath {
+                feed.proxySourceMode = .profile
+                feed.proxyProfileID = profile.id
+                didChange = true
+            }
+            if migrateContentPath {
+                feed.contentProxySourceMode = .profile
+                feed.contentProxyProfileID = profile.id
+                didChange = true
+            }
+            if feed.proxySourceMode != .custom && feed.contentProxySourceMode != .custom {
+                feed.proxyHost = ""
+                feed.proxyPort = nil
+                feed.proxyUsername = ""
+                _ = feed.setProxyPasswordSecurely("")
+            }
+        }
+
+        if didChange {
+            try? modelContext.save()
+        }
+
+        if failedCount > 0 {
+            refreshError = "Migrated most legacy custom proxy settings to saved profiles. \(failedCount) feed(s) could not be migrated automatically."
+        }
+        didMigrateCustomProxyToProfiles = !feeds.contains { feed in
+            (feed.useProxy && feed.proxySourceMode == .custom) ||
+            (feed.useProxyForContent && feed.contentProxySourceMode == .custom)
+        }
+    }
+
+    private func customProxySignature(from feed: Feed) -> ProxyProfileSignature? {
+        guard let config = feed.customProxyConfiguration else { return nil }
+        return ProxyProfileSignature(
+            type: config.type,
+            host: config.host.trimmingCharacters(in: .whitespacesAndNewlines),
+            port: config.port,
+            username: (config.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            password: (config.password ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func proxyProfileSignature(from profile: ProxyProfile) -> ProxyProfileSignature? {
+        guard let config = profile.configuration else { return nil }
+        return ProxyProfileSignature(
+            type: config.type,
+            host: config.host.trimmingCharacters(in: .whitespacesAndNewlines),
+            port: config.port,
+            username: (config.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            password: (config.password ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private func uniqueMigratedProxyProfileName(usedLowercasedNames: inout Set<String>) -> String {
+        while true {
+            let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(6).uppercased()
+            let candidate = "Migrated Proxy \(suffix)"
+            let key = candidate.lowercased()
+            if usedLowercasedNames.insert(key).inserted {
+                return candidate
+            }
+        }
+    }
+
     private func validateProxyValues(_ values: FeedFormValues) -> String? {
         guard values.useProxy || values.useProxyForContent else { return nil }
 
-        if values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Proxy is enabled. Please input proxy host."
+        if values.useProxy {
+            if values.proxySourceMode == .profile {
+                guard let profile = proxyProfile(matching: values.proxyProfileID) else {
+                    return "Feed URL proxy is enabled. Please choose a saved proxy profile."
+                }
+                guard profile.configuration != nil else {
+                    return "Selected feed URL proxy profile is incomplete."
+                }
+            } else {
+                if values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return "Feed URL proxy is enabled. Please input proxy host."
+                }
+                guard let port = values.proxyPort, (1...65535).contains(port) else {
+                    return "Feed URL proxy is enabled. Please input a valid proxy port (1-65535)."
+                }
+                _ = port
+            }
         }
 
-        guard let port = values.proxyPort, (1...65535).contains(port) else {
-            return "Proxy is enabled. Please input a valid proxy port (1-65535)."
+        if values.useProxyForContent {
+            if values.contentProxySourceMode == .profile {
+                guard let profile = proxyProfile(matching: values.contentProxyProfileID) else {
+                    return "Content proxy is enabled. Please choose a saved proxy profile."
+                }
+                guard profile.configuration != nil else {
+                    return "Selected content proxy profile is incomplete."
+                }
+            } else {
+                if values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return "Content proxy is enabled. Please input proxy host."
+                }
+                guard let port = values.proxyPort, (1...65535).contains(port) else {
+                    return "Content proxy is enabled. Please input a valid proxy port (1-65535)."
+                }
+                _ = port
+            }
         }
-        _ = port
 
         return nil
     }
 
     private func feedFetchProxyConfiguration(from values: FeedFormValues) -> FeedProxyConfiguration? {
         guard values.useProxy else { return nil }
+        if values.proxySourceMode == .profile {
+            return proxyProfile(matching: values.proxyProfileID)?.configuration
+        }
+        return customProxyConfiguration(from: values)
+    }
+
+    private func customProxyConfiguration(from values: FeedFormValues) -> FeedProxyConfiguration? {
         let host = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else { return nil }
         guard let port = values.proxyPort, (1...65535).contains(port) else { return nil }
@@ -2285,6 +3013,27 @@ struct ContentView: View {
             username: username.isEmpty ? nil : username,
             password: password.isEmpty ? nil : password
         )
+    }
+
+    private func proxyProfile(matching id: UUID?) -> ProxyProfile? {
+        guard let id else { return nil }
+        return proxyProfiles.first(where: { $0.id == id })
+    }
+
+    private func resolvedFeedFetchProxy(for feed: Feed) -> FeedProxyConfiguration? {
+        guard feed.useProxy else { return nil }
+        if feed.proxySourceMode == .profile {
+            return proxyProfile(matching: feed.proxyProfileID)?.configuration
+        }
+        return feed.customProxyConfiguration
+    }
+
+    private func resolvedContentProxy(for feed: Feed) -> FeedProxyConfiguration? {
+        guard feed.useProxyForContent else { return nil }
+        if feed.contentProxySourceMode == .profile {
+            return proxyProfile(matching: feed.contentProxyProfileID)?.configuration
+        }
+        return feed.customProxyConfiguration
     }
 
     private func addFeedFailureMessage(for error: Error, url: URL) -> String {
@@ -2407,7 +3156,7 @@ struct ContentView: View {
 
         let articleID = article.persistentModelID
         let generation = offlineCacheGeneration
-        let selectedProxy: FeedProxyConfiguration? = feed.useProxyForContent ? feed.contentProxyConfiguration : nil
+        let selectedProxy: FeedProxyConfiguration? = resolvedContentProxy(for: feed)
         let allowInsecureHTTPContent = feed.allowInsecureHTTPForContent
 
         article.offlineStatus = .caching
@@ -2433,13 +3182,21 @@ struct ContentView: View {
             return
         }
 
+        if shouldPauseBackgroundWorkForMenuBar {
+            offlinePendingRequests[request.articleID] = request
+            if !offlinePendingOrder.contains(request.articleID) {
+                offlinePendingOrder.append(request.articleID)
+            }
+            return
+        }
+
         if offlineCachingArticleIDs.count < offlineMaxConcurrentTasks {
             startOfflineCaching(request)
             return
         }
 
         guard offlinePendingOrder.count < offlineMaxQueuedTasks else {
-            if let article = articles.first(where: { $0.persistentModelID == request.articleID }) {
+            if let article = article(forPersistentID: request.articleID) {
                 if article.hasOfflineContent {
                     article.offlineStatus = .cached
                     article.offlineLastError = ""
@@ -2458,6 +3215,14 @@ struct ContentView: View {
 
     @MainActor
     private func startOfflineCaching(_ request: OfflineCacheRequest) {
+        if shouldPauseBackgroundWorkForMenuBar {
+            offlinePendingRequests[request.articleID] = request
+            if !offlinePendingOrder.contains(request.articleID) {
+                offlinePendingOrder.append(request.articleID)
+            }
+            return
+        }
+
         offlineCachingArticleIDs.insert(request.articleID)
 
         Task(priority: .utility) {
@@ -2485,6 +3250,7 @@ struct ContentView: View {
 
     @MainActor
     private func pumpOfflineCachingQueueIfPossible() {
+        guard !shouldPauseBackgroundWorkForMenuBar else { return }
         guard offlineCachingArticleIDs.count < offlineMaxConcurrentTasks else { return }
 
         while offlineCachingArticleIDs.count < offlineMaxConcurrentTasks,
@@ -2509,7 +3275,7 @@ struct ContentView: View {
         offlineCachingArticleIDs.remove(articleID)
         defer { pumpOfflineCachingQueueIfPossible() }
         guard generation == offlineCacheGeneration else { return }
-        guard let article = articles.first(where: { $0.persistentModelID == articleID }) else { return }
+        guard let article = article(forPersistentID: articleID) else { return }
 
         switch result {
         case .success(let html):
@@ -2532,11 +3298,25 @@ struct ContentView: View {
                 try? modelContext.save()
                 return
             }
+            let writeStartUptime = ProcessInfo.processInfo.systemUptime
             article.offlineCachedHTML = html
             article.offlineCachedBytes = htmlByteCount
             article.offlineCachedAt = Date()
             article.offlineLastError = ""
             article.offlineStatus = .cached
+            try? modelContext.save()
+            let elapsedMs = (ProcessInfo.processInfo.systemUptime - writeStartUptime) * 1000
+            recordPerformanceSample(
+                PerformanceSample(
+                    timestamp: Date(),
+                    kind: .offlineWrite,
+                    articleTitle: article.title,
+                    detail: "Background queue offline cache write",
+                    durationMs: elapsedMs,
+                    htmlBytes: htmlByteCount
+                )
+            )
+            return
         case .failure(let error):
             if article.hasOfflineContent {
                 article.offlineStatus = .cached
@@ -2571,7 +3351,7 @@ struct ContentView: View {
         offlineCachingArticleIDs.removeAll()
         offlinePendingRequests.removeAll()
         offlinePendingOrder.removeAll()
-        for article in articles {
+        for article in allArticlesSnapshot {
             clearOfflineCacheFields(for: article)
         }
         try? modelContext.save()
@@ -2768,6 +3548,22 @@ struct ContentView: View {
             )
         }
 
+        let proxyProfileBackups = proxyProfiles
+            .sorted { $0.createdAt < $1.createdAt }
+            .map { profile in
+                RZZBackupProxyProfile(
+                    id: profile.id,
+                    name: profile.name,
+                    proxyTypeRaw: profile.proxyTypeRaw,
+                    proxyHost: profile.proxyHost,
+                    proxyPort: profile.proxyPort,
+                    proxyUsername: profile.proxyUsername,
+                    hasProxyPassword: !profile.proxyPasswordValue.isEmpty,
+                    createdAt: profile.createdAt,
+                    updatedAt: profile.updatedAt
+                )
+            }
+
         let feedBackups = feeds
             .sorted { $0.createdAt < $1.createdAt }
             .map { feed in
@@ -2835,6 +3631,10 @@ struct ContentView: View {
                     useProxy: feed.useProxy,
                     useProxyForContent: feed.useProxyForContent,
                     allowInsecureHTTPForContent: feed.allowInsecureHTTPForContent,
+                    proxySourceModeRaw: feed.proxySourceModeRaw,
+                    contentProxySourceModeRaw: feed.contentProxySourceModeRaw,
+                    proxyProfileID: feed.proxyProfileID,
+                    contentProxyProfileID: feed.contentProxyProfileID,
                     proxyTypeRaw: feed.proxyTypeRaw,
                     proxyHost: feed.proxyHost,
                     proxyPort: feed.proxyPort,
@@ -2852,6 +3652,7 @@ struct ContentView: View {
             exportedAt: Date(),
             settings: RZZBackupSettings(customFeedFolderNames: customFolderNames),
             tags: tagBackups,
+            proxyProfiles: proxyProfileBackups,
             feeds: feedBackups
         )
     }
@@ -3031,7 +3832,8 @@ struct ContentView: View {
             let importedFeedCount = package.feeds.count
             let importedArticleCount = package.feeds.reduce(0) { $0 + $1.articles.count }
             let importedTagCount = package.tags.count
-            transferMessage = "Import complete: \(importedFeedCount) feeds, \(importedArticleCount) articles, \(importedTagCount) tags."
+            let importedProxyCount = package.proxyProfiles.count
+            transferMessage = "Import complete: \(importedFeedCount) feeds, \(importedArticleCount) articles, \(importedTagCount) tags, \(importedProxyCount) proxy profiles."
         } catch {
             transferMessage = "Import failed: \(error.localizedDescription)"
         }
@@ -3052,7 +3854,7 @@ struct ContentView: View {
     }
 
     private func validateBackupPackage(_ package: RZZBackupPackage) throws {
-        guard package.version == RZZBackupPackage.currentVersion else {
+        guard (RZZBackupPackage.minimumSupportedVersion...RZZBackupPackage.currentVersion).contains(package.version) else {
             throw backupValidationError("Unsupported backup version \(package.version).")
         }
 
@@ -3062,6 +3864,9 @@ struct ContentView: View {
         guard package.tags.count <= backupImportMaxTags else {
             throw backupValidationError("Backup contains too many tags (\(package.tags.count)). Max is \(backupImportMaxTags).")
         }
+        guard package.proxyProfiles.count <= maxProxyProfileCount else {
+            throw backupValidationError("Backup contains too many proxy profiles (\(package.proxyProfiles.count)). Max is \(maxProxyProfileCount).")
+        }
 
         var seenTagIDs: Set<UUID> = []
         for tag in package.tags {
@@ -3069,6 +3874,26 @@ struct ContentView: View {
                 throw backupValidationError("Backup has duplicate tag IDs.")
             }
             try validateStringLength(tag.name, max: backupImportMaxTagNameLength, field: "Tag name")
+        }
+
+        var seenProxyProfileIDs: Set<UUID> = []
+        for profile in package.proxyProfiles {
+            guard seenProxyProfileIDs.insert(profile.id).inserted else {
+                throw backupValidationError("Backup has duplicate proxy profile IDs.")
+            }
+            guard FeedProxyType(rawValue: profile.proxyTypeRaw) != nil else {
+                throw backupValidationError("Backup contains an invalid proxy type for profile \(profile.name).")
+            }
+            try validateStringLength(profile.name, max: backupImportMaxTagNameLength, field: "Proxy profile name")
+            try validateStringLength(profile.proxyHost, max: 255, field: "Proxy host")
+            try validateStringLength(profile.proxyUsername, max: 255, field: "Proxy username")
+            guard !profile.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw backupValidationError("Backup contains a proxy profile with empty host.")
+            }
+            guard let profilePort = profile.proxyPort, (1...65535).contains(profilePort) else {
+                throw backupValidationError("Backup contains an invalid proxy port for profile \(profile.name).")
+            }
+            _ = profilePort
         }
 
         var seenFeedIDs: Set<UUID> = []
@@ -3097,17 +3922,50 @@ struct ContentView: View {
             guard FeedProxyType(rawValue: feed.proxyTypeRaw) != nil else {
                 throw backupValidationError("Backup contains an invalid proxy type for feed \(feed.title).")
             }
-            if feed.useProxy || feed.useProxyForContent {
-                guard !feed.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw backupValidationError("Proxy host is missing for feed \(feed.title).")
-                }
-                guard let proxyPort = feed.proxyPort, (1...65535).contains(proxyPort) else {
-                    throw backupValidationError("Proxy port is invalid for feed \(feed.title).")
-                }
-                _ = proxyPort
-            } else if let proxyPort = feed.proxyPort {
+            guard FeedProxySourceMode(rawValue: feed.proxySourceModeRaw) != nil else {
+                throw backupValidationError("Backup contains an invalid feed proxy source mode for \(feed.title).")
+            }
+            guard FeedProxySourceMode(rawValue: feed.contentProxySourceModeRaw) != nil else {
+                throw backupValidationError("Backup contains an invalid content proxy source mode for \(feed.title).")
+            }
+
+            if let proxyPort = feed.proxyPort {
                 guard (1...65535).contains(proxyPort) else {
                     throw backupValidationError("Proxy port is invalid for feed \(feed.title).")
+                }
+            }
+
+            if feed.useProxy {
+                let sourceMode = FeedProxySourceMode(rawValue: feed.proxySourceModeRaw) ?? .custom
+                if sourceMode == .profile {
+                    guard let profileID = feed.proxyProfileID, seenProxyProfileIDs.contains(profileID) else {
+                        throw backupValidationError("Feed URL proxy profile is missing or invalid for feed \(feed.title).")
+                    }
+                } else {
+                    guard !feed.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw backupValidationError("Proxy host is missing for feed \(feed.title).")
+                    }
+                    guard let proxyPort = feed.proxyPort, (1...65535).contains(proxyPort) else {
+                        throw backupValidationError("Proxy port is invalid for feed \(feed.title).")
+                    }
+                    _ = proxyPort
+                }
+            }
+
+            if feed.useProxyForContent {
+                let sourceMode = FeedProxySourceMode(rawValue: feed.contentProxySourceModeRaw) ?? .custom
+                if sourceMode == .profile {
+                    guard let profileID = feed.contentProxyProfileID, seenProxyProfileIDs.contains(profileID) else {
+                        throw backupValidationError("Content proxy profile is missing or invalid for feed \(feed.title).")
+                    }
+                } else {
+                    guard !feed.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw backupValidationError("Proxy host is missing for feed \(feed.title).")
+                    }
+                    guard let proxyPort = feed.proxyPort, (1...65535).contains(proxyPort) else {
+                        throw backupValidationError("Proxy port is invalid for feed \(feed.title).")
+                    }
+                    _ = proxyPort
                 }
             }
 
@@ -3171,7 +4029,7 @@ struct ContentView: View {
 
     @MainActor
     private func importBackupPackage(_ package: RZZBackupPackage) throws {
-        guard package.version == RZZBackupPackage.currentVersion else {
+        guard (RZZBackupPackage.minimumSupportedVersion...RZZBackupPackage.currentVersion).contains(package.version) else {
             throw NSError(
                 domain: "RZZBackup",
                 code: 1,
@@ -3187,8 +4045,12 @@ struct ContentView: View {
         for tag in tags {
             modelContext.delete(tag)
         }
-        for article in articles where article.feed == nil {
+        for article in orphanArticles {
             modelContext.delete(article)
+        }
+        for profile in proxyProfiles {
+            profile.clearSecureProxyPassword()
+            modelContext.delete(profile)
         }
 
         offlineCacheGeneration += 1
@@ -3211,6 +4073,23 @@ struct ContentView: View {
             tagByID[backupTag.id] = tag
         }
 
+        var proxyProfileByID: [UUID: ProxyProfile] = [:]
+        for backupProfile in package.proxyProfiles.sorted(by: { $0.createdAt < $1.createdAt }) {
+            let profile = ProxyProfile(
+                name: backupProfile.name,
+                proxyType: FeedProxyType(rawValue: backupProfile.proxyTypeRaw) ?? .http,
+                proxyHost: backupProfile.proxyHost,
+                proxyPort: backupProfile.proxyPort,
+                proxyUsername: backupProfile.proxyUsername
+            )
+            profile.id = backupProfile.id
+            profile.proxyPassword = ""
+            profile.createdAt = backupProfile.createdAt
+            profile.updatedAt = backupProfile.updatedAt
+            modelContext.insert(profile)
+            proxyProfileByID[backupProfile.id] = profile
+        }
+
         for backupFeed in package.feeds.sorted(by: { $0.createdAt < $1.createdAt }) {
             let feed = Feed(
                 title: backupFeed.title,
@@ -3223,6 +4102,10 @@ struct ContentView: View {
             feed.useProxy = backupFeed.useProxy
             feed.useProxyForContent = backupFeed.useProxyForContent
             feed.allowInsecureHTTPForContent = backupFeed.allowInsecureHTTPForContent
+            feed.proxySourceModeRaw = backupFeed.proxySourceModeRaw
+            feed.contentProxySourceModeRaw = backupFeed.contentProxySourceModeRaw
+            feed.proxyProfileID = backupFeed.proxyProfileID
+            feed.contentProxyProfileID = backupFeed.contentProxyProfileID
             feed.proxyTypeRaw = backupFeed.proxyTypeRaw
             feed.proxyHost = backupFeed.proxyHost
             feed.proxyPort = backupFeed.proxyPort
@@ -3231,6 +4114,19 @@ struct ContentView: View {
             feed.createdAt = backupFeed.createdAt
             feed.lastFetchedAt = backupFeed.lastFetchedAt
             modelContext.insert(feed)
+
+            if feed.proxySourceMode == .profile,
+               let selectedProfileID = feed.proxyProfileID,
+               proxyProfileByID[selectedProfileID] == nil {
+                feed.proxySourceMode = .custom
+                feed.proxyProfileID = nil
+            }
+            if feed.contentProxySourceMode == .profile,
+               let selectedProfileID = feed.contentProxyProfileID,
+               proxyProfileByID[selectedProfileID] == nil {
+                feed.contentProxySourceMode = .custom
+                feed.contentProxyProfileID = nil
+            }
 
             for backupArticle in backupFeed.articles.sorted(by: { $0.createdAt < $1.createdAt }) {
                 let article = Article(
@@ -3257,6 +4153,7 @@ struct ContentView: View {
         }
 
         try modelContext.save()
+        didMigrateCustomProxyToProfiles = false
     }
 
     private func sanitizedProgress(_ value: Double) -> Double {
@@ -3365,6 +4262,130 @@ struct ContentView: View {
             article.tags.append(tag)
         }
         try? modelContext.save()
+        if selectedTagFilter != nil {
+            rebuildDisplayedArticleGroups()
+        }
+    }
+
+    private func proxyProfileUsageCount(_ profile: ProxyProfile) -> Int {
+        proxyProfileUsageCount(id: profile.id)
+    }
+
+    private func proxyProfileUsageCount(id: UUID) -> Int {
+        feeds.reduce(0) { partialResult, feed in
+            var count = partialResult
+            if feed.useProxy, feed.proxySourceMode == .profile, feed.proxyProfileID == id {
+                count += 1
+            }
+            if feed.useProxyForContent, feed.contentProxySourceMode == .profile, feed.contentProxyProfileID == id {
+                count += 1
+            }
+            return count
+        }
+    }
+
+    private func normalizedProxyProfileName(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func validateProxyProfileValues(
+        _ values: ProxyProfileFormValues,
+        excluding profileID: PersistentIdentifier? = nil
+    ) -> String? {
+        let host = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        if host.isEmpty {
+            return "Proxy host is required."
+        }
+        guard let port = values.proxyPort, (1...65535).contains(port) else {
+            return "Please input a valid proxy port (1-65535)."
+        }
+        _ = port
+
+        let normalizedName = normalizedProxyProfileName(values.name)
+        if !normalizedName.isEmpty {
+            let duplicate = proxyProfiles.contains(where: { profile in
+                guard profile.persistentModelID != profileID else { return false }
+                return profile.name.caseInsensitiveCompare(normalizedName) == .orderedSame
+            })
+            if duplicate {
+                return "A proxy profile with this name already exists."
+            }
+        }
+        return nil
+    }
+
+    private func createProxyProfile(values: ProxyProfileFormValues) -> String? {
+        if proxyProfiles.count >= maxProxyProfileCount {
+            return "You can save up to \(maxProxyProfileCount) proxy profiles."
+        }
+        if let validationError = validateProxyProfileValues(values) {
+            return validationError
+        }
+
+        let host = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = values.proxyPort else {
+            return "Please input a valid proxy port (1-65535)."
+        }
+
+        let normalizedName = normalizedProxyProfileName(values.name)
+        let effectiveName = normalizedName.isEmpty ? "\(host):\(port)" : normalizedName
+
+        let profile = ProxyProfile(
+            name: effectiveName,
+            proxyType: values.proxyType,
+            proxyHost: host,
+            proxyPort: port,
+            proxyUsername: values.proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        guard profile.setProxyPasswordSecurely(values.proxyPassword) else {
+            return "Could not save proxy password securely. Please verify Keychain is available and try again."
+        }
+        profile.updatedAt = Date()
+        modelContext.insert(profile)
+        try? modelContext.save()
+        return nil
+    }
+
+    private func updateProxyProfile(profileID: PersistentIdentifier, values: ProxyProfileFormValues) -> String? {
+        guard let profile = proxyProfiles.first(where: { $0.persistentModelID == profileID }) else {
+            return "Proxy profile no longer exists."
+        }
+        if let validationError = validateProxyProfileValues(values, excluding: profileID) {
+            return validationError
+        }
+
+        let host = values.proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = values.proxyPort else {
+            return "Please input a valid proxy port (1-65535)."
+        }
+
+        let normalizedName = normalizedProxyProfileName(values.name)
+        profile.name = normalizedName.isEmpty ? "\(host):\(port)" : normalizedName
+        profile.proxyType = values.proxyType
+        profile.proxyHost = host
+        profile.proxyPort = port
+        profile.proxyUsername = values.proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard profile.setProxyPasswordSecurely(values.proxyPassword) else {
+            return "Could not save proxy password securely. Please verify Keychain is available and try again."
+        }
+        profile.updatedAt = Date()
+        try? modelContext.save()
+        return nil
+    }
+
+    private func deleteProxyProfile(profileID: PersistentIdentifier) -> String? {
+        guard let profile = proxyProfiles.first(where: { $0.persistentModelID == profileID }) else {
+            return "Proxy profile no longer exists."
+        }
+        let usageCount = proxyProfileUsageCount(id: profile.id)
+        guard usageCount == 0 else {
+            return "This proxy profile is currently in use by \(usageCount) feed access path(s)."
+        }
+
+        profile.clearSecureProxyPassword()
+        modelContext.delete(profile)
+        try? modelContext.save()
+        return nil
     }
 
     private func bindingForFolderExpansion(named name: String) -> Binding<Bool> {
@@ -3426,29 +4447,52 @@ struct ContentView: View {
 private struct FeedFetchSignature: Equatable {
     let urlString: String
     let useProxy: Bool
+    let proxySourceMode: FeedProxySourceMode
+    let proxyProfileID: UUID?
     let proxyType: FeedProxyType
     let proxyHost: String
     let proxyPort: Int?
     let proxyUsername: String
     let proxyPassword: String
+    let useProxyForContent: Bool
+    let contentProxySourceMode: FeedProxySourceMode
+    let contentProxyProfileID: UUID?
 
     init(
         urlString: String,
         useProxy: Bool,
+        proxySourceMode: FeedProxySourceMode,
+        proxyProfileID: UUID?,
         proxyType: FeedProxyType,
         proxyHost: String,
         proxyPort: Int?,
         proxyUsername: String,
-        proxyPassword: String
+        proxyPassword: String,
+        useProxyForContent: Bool,
+        contentProxySourceMode: FeedProxySourceMode,
+        contentProxyProfileID: UUID?
     ) {
         self.urlString = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         self.useProxy = useProxy
+        self.proxySourceMode = proxySourceMode
+        self.proxyProfileID = proxyProfileID
         self.proxyType = proxyType
         self.proxyHost = proxyHost.trimmingCharacters(in: .whitespacesAndNewlines)
         self.proxyPort = proxyPort
         self.proxyUsername = proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         self.proxyPassword = proxyPassword
+        self.useProxyForContent = useProxyForContent
+        self.contentProxySourceMode = contentProxySourceMode
+        self.contentProxyProfileID = contentProxyProfileID
     }
+}
+
+private struct ProxyProfileSignature: Hashable {
+    let type: FeedProxyType
+    let host: String
+    let port: Int
+    let username: String
+    let password: String
 }
 
 private struct FeedScopeRow: View {
@@ -3516,6 +4560,11 @@ private struct FeedScopeRow: View {
                     .accessibilityLabel("Insecure HTTP content allowed for this feed")
             }
         }
+        .listRowBackground(
+            isSelected
+            ? Color.accentColor.opacity(0.16)
+            : Color.clear
+        )
     }
 }
 
@@ -3556,11 +4605,16 @@ private struct ArticleRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            if !article.summary.isEmpty {
-                Text(HTMLText.makePreview(from: article.summary))
-                    .font(.subheadline)
+            if isSelected && !article.summary.isEmpty {
+                Text(
+                    HTMLText.makePreview(
+                        from: article.summary,
+                        cacheKey: "\(article.id.uuidString)-\(article.summary.utf8.count)"
+                    )
+                )
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                    .lineLimit(2)
             }
         }
         .padding(.vertical, 4)
@@ -3583,6 +4637,8 @@ private struct ArticleRow: View {
 }
 
 private struct ArticleDetailView: View {
+    private let maxOfflineHTMLBytes = 5_000_000
+
     private enum ContentLoadState {
         case loading
         case loaded
@@ -3592,10 +4648,15 @@ private struct ArticleDetailView: View {
     @Bindable var article: Article
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     let tags: [Tag]
+    let isPerformanceDiagnosticsEnabled: Bool
+    let contentProxyResolver: (Feed) -> FeedProxyConfiguration?
     let onToggleTag: (Tag, Article) -> Void
+    let onToggleStar: () -> Void
     let onOpenTagManager: () -> Void
     let onRetryOfflineCaching: () -> Void
+    let onPerformanceSample: (PerformanceSample) -> Void
     @State private var isBodyLoading = false
     @State private var showSkeleton = true
     @State private var bodyHTML: String = ""
@@ -3603,7 +4664,9 @@ private struct ArticleDetailView: View {
     @State private var activeBodyLoadID = UUID()
     @State private var contentPathUsesProxy = false
     @State private var contentLoadState: ContentLoadState = .loading
-    @State private var lastSavedScrollProgress: Double = -1
+    @State private var readingProgressBuffer = ReadingProgressBuffer()
+    @State private var mainThreadLagMonitorTask: Task<Void, Never>?
+    @State private var renderMeasurementStartUptime: TimeInterval = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -3620,6 +4683,7 @@ private struct ArticleDetailView: View {
 
                 Button {
                     article.isStarred.toggle()
+                    onToggleStar()
                 } label: {
                     Label(article.isStarred ? "Unstar" : "Star", systemImage: article.isStarred ? "star.slash" : "star")
                 }
@@ -3765,7 +4829,8 @@ private struct ArticleDetailView: View {
                             htmlBody: bodyHTML,
                             sourceURL: parseSupportedWebURL(article.link),
                             initialScrollProgress: article.readingScrollProgress,
-                            onScrollProgressChange: persistReadingProgress
+                            onScrollProgressChange: persistReadingProgress,
+                            onScrollBridgeSnapshot: handleScrollBridgeSnapshot(_:)
                         )
                         .opacity(showSkeleton ? 0.06 : 1.0)
                         .animation(.easeInOut(duration: 0.18), value: showSkeleton)
@@ -3784,25 +4849,53 @@ private struct ArticleDetailView: View {
         .navigationTitle("Article")
         .onAppear {
             reloadBodyHTML()
+            startMainThreadLagMonitorIfNeeded()
         }
         .onChange(of: article.persistentModelID) { _, _ in
             reloadBodyHTML()
+            startMainThreadLagMonitorIfNeeded()
+        }
+        .onChange(of: isPerformanceDiagnosticsEnabled) { _, isEnabled in
+            if isEnabled {
+                startMainThreadLagMonitorIfNeeded()
+            } else {
+                stopMainThreadLagMonitor()
+            }
         }
         .onDisappear {
             bodyLoadTask?.cancel()
+            readingProgressBuffer.commitTask?.cancel()
+            readingProgressBuffer.commitTask = nil
+            stopMainThreadLagMonitor()
+            if readingProgressBuffer.pendingProgress >= 0 {
+                commitReadingProgress(readingProgressBuffer.pendingProgress, minimumDelta: 0.001)
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                startMainThreadLagMonitorIfNeeded()
+                return
+            }
+            readingProgressBuffer.commitTask?.cancel()
+            readingProgressBuffer.commitTask = nil
+            stopMainThreadLagMonitor()
+            if readingProgressBuffer.pendingProgress >= 0 {
+                commitReadingProgress(readingProgressBuffer.pendingProgress, minimumDelta: 0.001)
+            }
         }
     }
 
     private func reloadBodyHTML() {
         bodyLoadTask?.cancel()
+        renderMeasurementStartUptime = ProcessInfo.processInfo.systemUptime
         let loadID = UUID()
         activeBodyLoadID = loadID
 
         let summary = article.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackHTML = summary.isEmpty ? "<p>No summary available.</p>" : article.summary
         let articleLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
-        let proxy = article.feed?.contentProxyConfiguration
-        let shouldUseProxyForContent = article.feed?.useProxyForContent ?? false
+        let proxy = article.feed.flatMap(contentProxyResolver)
+        let shouldUseProxyForContent = proxy != nil
         let allowInsecureHTTPContent = article.feed?.allowInsecureHTTPForContent ?? false
         let offlinePolicy = article.feed?.offlinePolicy ?? .off
         let cachedHTML = article.offlineCachedHTML
@@ -3824,7 +4917,7 @@ private struct ArticleDetailView: View {
                 showSkeleton = true
             }
         }
-        lastSavedScrollProgress = article.readingScrollProgress
+        readingProgressBuffer.reset(with: article.readingScrollProgress)
 
         if hasCachedHTML {
             withAnimation(.easeInOut(duration: 0.12)) {
@@ -3833,6 +4926,7 @@ private struct ArticleDetailView: View {
                 isBodyLoading = false
                 showSkeleton = false
             }
+            emitRenderPerformanceSample(source: "offline-cache", htmlBytes: cachedHTML.lengthOfBytes(using: .utf8))
             if offlinePolicy == .fullContent {
                 return
             }
@@ -3845,11 +4939,15 @@ private struct ArticleDetailView: View {
                 isBodyLoading = false
                 showSkeleton = false
             }
+            emitRenderPerformanceSample(
+                source: hasCachedHTML ? "offline-cache" : "summary-fallback",
+                htmlBytes: hasCachedHTML ? cachedHTML.lengthOfBytes(using: .utf8) : fallbackHTML.lengthOfBytes(using: .utf8)
+            )
             return
         }
 
         bodyLoadTask = Task {
-            let selectedProxy: FeedProxyConfiguration? = shouldUseProxyForContent ? proxy : nil
+            let selectedProxy: FeedProxyConfiguration? = proxy
             let result: Result<String, Error>
             do {
                 let fetched = try await RSSService.fetchArticleHTML(
@@ -3881,6 +4979,7 @@ private struct ArticleDetailView: View {
                         isBodyLoading = false
                         showSkeleton = false
                     }
+                    emitRenderPerformanceSample(source: "network", htmlBytes: fetchedHTML.lengthOfBytes(using: .utf8))
                 case .failure(let error):
                     if offlinePolicy == .fullContent {
                         updateOfflineFailureState(error)
@@ -3895,6 +4994,11 @@ private struct ArticleDetailView: View {
                         }
                         isBodyLoading = false
                         showSkeleton = false
+                    }
+                    if article.hasOfflineContent {
+                        emitRenderPerformanceSample(source: "offline-cache-fallback", htmlBytes: article.offlineCachedHTML.lengthOfBytes(using: .utf8))
+                    } else {
+                        emitRenderPerformanceSample(source: "summary-fallback", htmlBytes: fallbackHTML.lengthOfBytes(using: .utf8))
                     }
                 }
             }
@@ -3911,9 +5015,119 @@ private struct ArticleDetailView: View {
 
     private func persistReadingProgress(_ progress: Double) {
         let clamped = min(max(progress, 0), 1)
-        guard abs(clamped - lastSavedScrollProgress) >= 0.01 else { return }
-        lastSavedScrollProgress = clamped
+        let now = ProcessInfo.processInfo.systemUptime
+        if readingProgressBuffer.pendingProgress >= 0 {
+            let delta = abs(clamped - readingProgressBuffer.pendingProgress)
+            if delta < 0.02 && (now - readingProgressBuffer.lastPendingUpdateUptime) < 0.8 {
+                return
+            }
+        }
+        readingProgressBuffer.pendingProgress = clamped
+        readingProgressBuffer.lastPendingUpdateUptime = now
+        scheduleProgressCommit()
+    }
+
+    private func scheduleProgressCommit() {
+        readingProgressBuffer.commitTask?.cancel()
+        readingProgressBuffer.commitTask = Task(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard readingProgressBuffer.pendingProgress >= 0 else { return }
+                commitReadingProgress(readingProgressBuffer.pendingProgress, minimumDelta: 0.05)
+            }
+        }
+    }
+
+    private func commitReadingProgress(_ progress: Double, minimumDelta: Double) {
+        let clamped = min(max(progress, 0), 1)
+        guard abs(clamped - readingProgressBuffer.lastSavedProgress) >= minimumDelta else { return }
+        let writeStartUptime = ProcessInfo.processInfo.systemUptime
+        readingProgressBuffer.lastSavedProgress = clamped
         article.readingScrollProgress = clamped
+
+        guard isPerformanceDiagnosticsEnabled else { return }
+        let elapsedMs = max((ProcessInfo.processInfo.systemUptime - writeStartUptime) * 1000, 0)
+        onPerformanceSample(
+            PerformanceSample(
+                timestamp: Date(),
+                kind: .progressCommit,
+                articleTitle: article.title,
+                detail: "Saved reading progress to \(Int(clamped * 100))%",
+                durationMs: elapsedMs,
+                htmlBytes: nil
+            )
+        )
+    }
+
+    private func handleScrollBridgeSnapshot(_ snapshot: ScrollBridgeSnapshot) {
+        guard isPerformanceDiagnosticsEnabled else { return }
+        guard snapshot.rawEventCount > 0 else { return }
+
+        let deliveredRate = snapshot.windowSeconds > 0
+        ? (Double(snapshot.deliveredEventCount) / snapshot.windowSeconds)
+        : 0
+        let droppedRate = Double(snapshot.droppedEventCount) / Double(snapshot.rawEventCount) * 100
+        let summary = "raw \(snapshot.rawEventCount), sent \(snapshot.deliveredEventCount), dropped \(Int(droppedRate.rounded()))%, rate \(String(format: "%.1f", deliveredRate))/s"
+        let intervalMs = snapshot.averageDeliveredIntervalMs > 0
+        ? snapshot.averageDeliveredIntervalMs
+        : 0
+
+        onPerformanceSample(
+            PerformanceSample(
+                timestamp: Date(),
+                kind: .scrollBridge,
+                articleTitle: article.title,
+                detail: summary,
+                durationMs: intervalMs,
+                htmlBytes: nil
+            )
+        )
+    }
+
+    private func startMainThreadLagMonitorIfNeeded() {
+        guard isPerformanceDiagnosticsEnabled else { return }
+        guard scenePhase == .active else { return }
+        stopMainThreadLagMonitor()
+        mainThreadLagMonitorTask = Task(priority: .utility) {
+            while !Task.isCancelled {
+                let enqueueUptime = ProcessInfo.processInfo.systemUptime
+                await MainActor.run {
+                    let lagMs = max((ProcessInfo.processInfo.systemUptime - enqueueUptime) * 1000, 0)
+                    guard lagMs >= 24 else { return }
+                    onPerformanceSample(
+                        PerformanceSample(
+                            timestamp: Date(),
+                            kind: .mainThreadLag,
+                            articleTitle: article.title,
+                            detail: "Main-thread hop latency while reading",
+                            durationMs: lagMs,
+                            htmlBytes: nil
+                        )
+                    )
+                }
+                try? await Task.sleep(nanoseconds: 850_000_000)
+            }
+        }
+    }
+
+    private func stopMainThreadLagMonitor() {
+        mainThreadLagMonitorTask?.cancel()
+        mainThreadLagMonitorTask = nil
+    }
+
+    private func emitRenderPerformanceSample(source: String, htmlBytes: Int) {
+        let elapsedMs = max((ProcessInfo.processInfo.systemUptime - renderMeasurementStartUptime) * 1000, 0)
+        onPerformanceSample(
+            PerformanceSample(
+                timestamp: Date(),
+                kind: .render,
+                articleTitle: article.title,
+                detail: "Article render via \(source)",
+                durationMs: elapsedMs,
+                htmlBytes: htmlBytes
+            )
+        )
     }
 
     @ViewBuilder
@@ -3944,13 +5158,32 @@ private struct ArticleDetailView: View {
     private func setOfflineCacheFromFetchedHTML(_ html: String) {
         let normalized = html.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return }
+        let htmlByteCount = html.lengthOfBytes(using: .utf8)
+        if htmlByteCount > maxOfflineHTMLBytes {
+            article.offlineStatus = article.hasOfflineContent ? .cached : .failed
+            article.offlineLastError = "Article is too large for offline cache (limit \(ByteCountFormatter.string(fromByteCount: Int64(maxOfflineHTMLBytes), countStyle: .file)))."
+            try? modelContext.save()
+            return
+        }
 
+        let writeStartUptime = ProcessInfo.processInfo.systemUptime
         article.offlineCachedHTML = html
-        article.offlineCachedBytes = html.lengthOfBytes(using: .utf8)
+        article.offlineCachedBytes = htmlByteCount
         article.offlineCachedAt = Date()
         article.offlineStatus = .cached
         article.offlineLastError = ""
         try? modelContext.save()
+        let elapsedMs = (ProcessInfo.processInfo.systemUptime - writeStartUptime) * 1000
+        onPerformanceSample(
+            PerformanceSample(
+                timestamp: Date(),
+                kind: .offlineWrite,
+                articleTitle: article.title,
+                detail: "Detail view offline cache write",
+                durationMs: elapsedMs,
+                htmlBytes: htmlByteCount
+            )
+        )
     }
 
     private func updateOfflineFailureState(_ error: Error) {
@@ -4057,21 +5290,34 @@ private struct ArticleHTMLView: View {
     var sourceURL: URL? = nil
     var initialScrollProgress: Double = 0
     var onScrollProgressChange: (Double) -> Void = { _ in }
+    var onScrollBridgeSnapshot: (ScrollBridgeSnapshot) -> Void = { _ in }
     var onLoadingStateChange: (Bool) -> Void = { _ in }
+    @State private var preparedHTMLDocument: String = ""
+    @State private var preparedCacheKey: String = ""
 
     var body: some View {
         HTMLWebView(
-            html: htmlDocument,
+            html: preparedHTMLDocument.isEmpty ? htmlBody : preparedHTMLDocument,
             baseURL: sourceURL,
             initialScrollProgress: initialScrollProgress,
             onScrollProgressChange: onScrollProgressChange,
+            onScrollBridgeSnapshot: onScrollBridgeSnapshot,
             onLoadingStateChange: onLoadingStateChange
         )
             .background(Color.clear)
+            .onAppear {
+                prepareDocumentIfNeeded(force: false)
+            }
+            .onChange(of: htmlBody) { _, _ in
+                prepareDocumentIfNeeded(force: true)
+            }
     }
 
-    private var htmlDocument: String {
-        applyReaderOverrides(to: htmlBody)
+    private func prepareDocumentIfNeeded(force: Bool) {
+        let key = "\(htmlBody.utf8.count)-\(htmlBody.hashValue)"
+        guard force || key != preparedCacheKey else { return }
+        preparedCacheKey = key
+        preparedHTMLDocument = applyReaderOverrides(to: htmlBody)
     }
 
     private func applyReaderOverrides(to html: String) -> String {
@@ -4181,6 +5427,9 @@ private struct ArticleHTMLView: View {
               "icon", "social", "share", "follow",
               "twitter", "x.com", "x-twitter", "reddit", "weibo", "wechat",
               "facebook", "instagram", "linkedin", "telegram", "mastodon", "threads", "bluesky",
+              "youtube", "tiktok", "whatsapp", "pinterest", "snapchat",
+              "iconfont", "glyph", "material-icon", "material-symbol",
+              "logo", "monogram", "wordmark", "brandmark",
               "arrow", "chevron", "caret", "next", "prev", "previous", "forward", "back"
             ];
 
@@ -4193,6 +5442,20 @@ private struct ArticleHTMLView: View {
               el.style.borderRadius = "0";
               el.style.display = "inline-block";
               el.style.verticalAlign = "middle";
+            }
+
+            function clampAsGlyphIcon(el) {
+              el.style.fontSize = "1.1em";
+              el.style.lineHeight = "1";
+              el.style.width = "1.1em";
+              el.style.height = "1.1em";
+              el.style.maxWidth = "1.1em";
+              el.style.maxHeight = "1.1em";
+              el.style.display = "inline-flex";
+              el.style.alignItems = "center";
+              el.style.justifyContent = "center";
+              el.style.verticalAlign = "middle";
+              el.style.overflow = "hidden";
             }
 
             function parseViewBoxSize(el) {
@@ -4213,7 +5476,48 @@ private struct ArticleHTMLView: View {
               return isFinite(value) && value > 0 ? value : null;
             }
 
+            function isArrowGlyphText(text) {
+              var trimmed = String(text || "").trim();
+              if (!trimmed) return false;
+              if (trimmed.length > 3) return false;
+              return /^[\\u2190-\\u21FF\\u27A1\\u27A4\\u27A8\\u2039\\u203A\\u00AB\\u00BB\\u3008\\u3009]+$/.test(trimmed);
+            }
+
+            function isLikelyDecorativeLargeIcon(el) {
+              if (!el || !el.getBoundingClientRect) return false;
+              var rect = el.getBoundingClientRect();
+              var vw = Math.max(
+                document.documentElement ? document.documentElement.clientWidth : 0,
+                window.innerWidth || 0
+              );
+              if (!vw) return false;
+              if (rect.width < vw * 0.52) return false;
+              if (rect.height > Math.max(480, vw * 1.2)) return false;
+              if (el.closest("figure, picture")) return false;
+
+              var text = (el.textContent || "").trim();
+              if (text.length > 6) return false;
+
+              var blob = [
+                el.className || "",
+                el.id || "",
+                el.getAttribute("aria-label") || "",
+                el.getAttribute("title") || "",
+                el.getAttribute("alt") || ""
+              ].join(" ");
+
+              if (containsToken(blob, iconTokens)) return true;
+
+              var aspect = rect.width / Math.max(rect.height, 1);
+              if (aspect >= 0.6 && aspect <= 2.2) {
+                return true;
+              }
+              return false;
+            }
+
             function looksLikeIcon(el) {
+              if (el.closest("figure, picture")) return false;
+
               var parent = el.parentElement;
               var blob = [
                 el.className || "",
@@ -4266,6 +5570,30 @@ private struct ArticleHTMLView: View {
               return false;
             }
 
+            function looksLikeGlyphIcon(el) {
+              if (!el) return false;
+              var blob = [
+                el.className || "",
+                el.id || "",
+                el.getAttribute("aria-label") || "",
+                el.getAttribute("title") || ""
+              ].join(" ");
+              var text = (el.textContent || "").trim();
+              var style = window.getComputedStyle(el);
+              var fontSize = parseFloat((style && style.fontSize) || "0");
+
+              if (isArrowGlyphText(text) && fontSize >= 22) return true;
+              if (containsToken(blob, iconTokens) && text.length <= 4) return true;
+              if ((el.tagName === "I" || el.tagName === "SPAN") && containsToken(blob, ["icon", "glyph", "arrow"])) return true;
+
+              var beforeStyle = window.getComputedStyle(el, "::before");
+              var beforeContent = beforeStyle ? String(beforeStyle.content || "") : "";
+              if (beforeContent && beforeContent !== "none" && containsToken(blob, iconTokens)) {
+                return true;
+              }
+              return false;
+            }
+
             function applySizeHints(el) {
               var styleHint = el.getAttribute("data-rzz-style");
               if (!styleHint) return;
@@ -4297,13 +5625,18 @@ private struct ArticleHTMLView: View {
                 if (srcset) img.setAttribute("srcset", srcset);
               }
               applySizeHints(img);
-              if (looksLikeIcon(img)) clampAsIcon(img);
+              if (looksLikeIcon(img) || isLikelyDecorativeLargeIcon(img)) clampAsIcon(img);
             });
 
             var svgs = document.querySelectorAll("svg");
             svgs.forEach(function(svg) {
               applySizeHints(svg);
-              if (looksLikeIcon(svg)) clampAsIcon(svg);
+              if (looksLikeIcon(svg) || isLikelyDecorativeLargeIcon(svg)) clampAsIcon(svg);
+            });
+
+            var glyphCandidates = document.querySelectorAll("i, span, em, strong, b, a, button");
+            glyphCandidates.forEach(function(el) {
+              if (looksLikeGlyphIcon(el)) clampAsGlyphIcon(el);
             });
           }
 
@@ -4326,6 +5659,8 @@ private struct ArticleHTMLView: View {
           window.addEventListener("load", run);
           setTimeout(run, 0);
           setTimeout(run, 120);
+          setTimeout(run, 420);
+          setTimeout(run, 900);
         })();
         </script>
         </head>
@@ -4436,12 +5771,14 @@ private struct HTMLWebView: NSViewRepresentable {
     var baseURL: URL? = nil
     var initialScrollProgress: Double = 0
     var onScrollProgressChange: (Double) -> Void = { _ in }
+    var onScrollBridgeSnapshot: (ScrollBridgeSnapshot) -> Void = { _ in }
     var onLoadingStateChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             initialScrollProgress: initialScrollProgress,
             onScrollProgressChange: onScrollProgressChange,
+            onScrollBridgeSnapshot: onScrollBridgeSnapshot,
             onLoadingStateChange: onLoadingStateChange
         )
     }
@@ -4475,16 +5812,28 @@ private struct HTMLWebView: NSViewRepresentable {
         var lastHTML: String = ""
         var shouldRestoreOnNextFinish = false
         var initialScrollProgress: Double
+        private var lastReportedProgress: Double = -1
+        private var lastReportedAt: TimeInterval = 0
+        private var rawEventCount = 0
+        private var deliveredEventCount = 0
+        private var droppedEventCount = 0
+        private var deliveredIntervalTotal: TimeInterval = 0
+        private var deliveredIntervalCount = 0
+        private var lastDeliveredMessageAt: TimeInterval = 0
+        private var diagnosticsWindowStart: TimeInterval = Date().timeIntervalSince1970
         let onScrollProgressChange: (Double) -> Void
+        let onScrollBridgeSnapshot: (ScrollBridgeSnapshot) -> Void
         let onLoadingStateChange: (Bool) -> Void
 
         init(
             initialScrollProgress: Double,
             onScrollProgressChange: @escaping (Double) -> Void,
+            onScrollBridgeSnapshot: @escaping (ScrollBridgeSnapshot) -> Void,
             onLoadingStateChange: @escaping (Bool) -> Void
         ) {
             self.initialScrollProgress = initialScrollProgress
             self.onScrollProgressChange = onScrollProgressChange
+            self.onScrollBridgeSnapshot = onScrollBridgeSnapshot
             self.onLoadingStateChange = onLoadingStateChange
         }
 
@@ -4504,15 +5853,45 @@ private struct HTMLWebView: NSViewRepresentable {
                 var progress = maxScroll > 0 ? (y / maxScroll) : 0;
                 return Math.max(0, Math.min(1, progress));
               }
-              function publish() {
+
+              var lastValue = -1;
+              var lastSentAt = 0;
+              var debounceTimer = null;
+
+              function emit(force) {
+                var value = computeProgress();
+                var now = Date.now();
+                var delta = Math.abs(value - lastValue);
+                if (!force) {
+                  if (delta < 0.01 && (now - lastSentAt) < 900) return;
+                }
+                lastValue = value;
+                lastSentAt = now;
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(Self.scrollMessageHandlerName)) {
-                  window.webkit.messageHandlers.\(Self.scrollMessageHandlerName).postMessage(computeProgress());
+                  window.webkit.messageHandlers.\(Self.scrollMessageHandlerName).postMessage(value);
                 }
               }
-              window.addEventListener('scroll', publish, { passive: true });
-              window.addEventListener('resize', publish);
-              document.addEventListener('readystatechange', publish);
-              setTimeout(publish, 0);
+
+              function scheduleEmit() {
+                if (debounceTimer) {
+                  clearTimeout(debounceTimer);
+                }
+                debounceTimer = setTimeout(function() {
+                  debounceTimer = null;
+                  emit(false);
+                }, 860);
+              }
+
+              window.addEventListener('scroll', scheduleEmit, { passive: true });
+              window.addEventListener('resize', function() { emit(true); });
+              document.addEventListener('visibilitychange', function() {
+                if (document.hidden) {
+                  emit(true);
+                }
+              });
+              window.addEventListener('pagehide', function() { emit(true); });
+              setTimeout(function() { emit(true); }, 0);
+              setTimeout(function() { emit(true); }, 320);
             })();
             """
             let script = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
@@ -4564,7 +5943,51 @@ private struct HTMLWebView: NSViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == Self.scrollMessageHandlerName else { return }
             guard let value = message.body as? Double else { return }
-            onScrollProgressChange(value)
+            rawEventCount += 1
+            let clamped = min(max(value, 0), 1)
+            let now = Date().timeIntervalSince1970
+            if lastReportedProgress >= 0 {
+                let delta = abs(clamped - lastReportedProgress)
+                if delta < 0.012 && (now - lastReportedAt) < 0.55 {
+                    droppedEventCount += 1
+                    emitScrollBridgeSnapshotIfNeeded(now: now)
+                    return
+                }
+            }
+            if lastDeliveredMessageAt > 0 {
+                deliveredIntervalTotal += (now - lastDeliveredMessageAt)
+                deliveredIntervalCount += 1
+            }
+            lastDeliveredMessageAt = now
+            deliveredEventCount += 1
+            lastReportedProgress = clamped
+            lastReportedAt = now
+            onScrollProgressChange(clamped)
+            emitScrollBridgeSnapshotIfNeeded(now: now)
+        }
+
+        private func emitScrollBridgeSnapshotIfNeeded(now: TimeInterval) {
+            let window = now - diagnosticsWindowStart
+            guard window >= 2.2 else { return }
+            let averageIntervalMs = deliveredIntervalCount > 0
+            ? (deliveredIntervalTotal / Double(deliveredIntervalCount)) * 1000
+            : 0
+            onScrollBridgeSnapshot(
+                ScrollBridgeSnapshot(
+                    windowSeconds: window,
+                    rawEventCount: rawEventCount,
+                    deliveredEventCount: deliveredEventCount,
+                    droppedEventCount: droppedEventCount,
+                    averageDeliveredIntervalMs: averageIntervalMs
+                )
+            )
+
+            diagnosticsWindowStart = now
+            rawEventCount = 0
+            deliveredEventCount = 0
+            droppedEventCount = 0
+            deliveredIntervalTotal = 0
+            deliveredIntervalCount = 0
         }
     }
 }
@@ -4574,12 +5997,14 @@ private struct HTMLWebView: UIViewRepresentable {
     var baseURL: URL? = nil
     var initialScrollProgress: Double = 0
     var onScrollProgressChange: (Double) -> Void = { _ in }
+    var onScrollBridgeSnapshot: (ScrollBridgeSnapshot) -> Void = { _ in }
     var onLoadingStateChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             initialScrollProgress: initialScrollProgress,
             onScrollProgressChange: onScrollProgressChange,
+            onScrollBridgeSnapshot: onScrollBridgeSnapshot,
             onLoadingStateChange: onLoadingStateChange
         )
     }
@@ -4613,16 +6038,28 @@ private struct HTMLWebView: UIViewRepresentable {
         var lastHTML: String = ""
         var shouldRestoreOnNextFinish = false
         var initialScrollProgress: Double
+        private var lastReportedProgress: Double = -1
+        private var lastReportedAt: TimeInterval = 0
+        private var rawEventCount = 0
+        private var deliveredEventCount = 0
+        private var droppedEventCount = 0
+        private var deliveredIntervalTotal: TimeInterval = 0
+        private var deliveredIntervalCount = 0
+        private var lastDeliveredMessageAt: TimeInterval = 0
+        private var diagnosticsWindowStart: TimeInterval = Date().timeIntervalSince1970
         let onScrollProgressChange: (Double) -> Void
+        let onScrollBridgeSnapshot: (ScrollBridgeSnapshot) -> Void
         let onLoadingStateChange: (Bool) -> Void
 
         init(
             initialScrollProgress: Double,
             onScrollProgressChange: @escaping (Double) -> Void,
+            onScrollBridgeSnapshot: @escaping (ScrollBridgeSnapshot) -> Void,
             onLoadingStateChange: @escaping (Bool) -> Void
         ) {
             self.initialScrollProgress = initialScrollProgress
             self.onScrollProgressChange = onScrollProgressChange
+            self.onScrollBridgeSnapshot = onScrollBridgeSnapshot
             self.onLoadingStateChange = onLoadingStateChange
         }
 
@@ -4642,15 +6079,45 @@ private struct HTMLWebView: UIViewRepresentable {
                 var progress = maxScroll > 0 ? (y / maxScroll) : 0;
                 return Math.max(0, Math.min(1, progress));
               }
-              function publish() {
+
+              var lastValue = -1;
+              var lastSentAt = 0;
+              var debounceTimer = null;
+
+              function emit(force) {
+                var value = computeProgress();
+                var now = Date.now();
+                var delta = Math.abs(value - lastValue);
+                if (!force) {
+                  if (delta < 0.01 && (now - lastSentAt) < 900) return;
+                }
+                lastValue = value;
+                lastSentAt = now;
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(Self.scrollMessageHandlerName)) {
-                  window.webkit.messageHandlers.\(Self.scrollMessageHandlerName).postMessage(computeProgress());
+                  window.webkit.messageHandlers.\(Self.scrollMessageHandlerName).postMessage(value);
                 }
               }
-              window.addEventListener('scroll', publish, { passive: true });
-              window.addEventListener('resize', publish);
-              document.addEventListener('readystatechange', publish);
-              setTimeout(publish, 0);
+
+              function scheduleEmit() {
+                if (debounceTimer) {
+                  clearTimeout(debounceTimer);
+                }
+                debounceTimer = setTimeout(function() {
+                  debounceTimer = null;
+                  emit(false);
+                }, 860);
+              }
+
+              window.addEventListener('scroll', scheduleEmit, { passive: true });
+              window.addEventListener('resize', function() { emit(true); });
+              document.addEventListener('visibilitychange', function() {
+                if (document.hidden) {
+                  emit(true);
+                }
+              });
+              window.addEventListener('pagehide', function() { emit(true); });
+              setTimeout(function() { emit(true); }, 0);
+              setTimeout(function() { emit(true); }, 320);
             })();
             """
             let script = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
@@ -4702,15 +6169,74 @@ private struct HTMLWebView: UIViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == Self.scrollMessageHandlerName else { return }
             guard let value = message.body as? Double else { return }
-            onScrollProgressChange(value)
+            rawEventCount += 1
+            let clamped = min(max(value, 0), 1)
+            let now = Date().timeIntervalSince1970
+            if lastReportedProgress >= 0 {
+                let delta = abs(clamped - lastReportedProgress)
+                if delta < 0.012 && (now - lastReportedAt) < 0.55 {
+                    droppedEventCount += 1
+                    emitScrollBridgeSnapshotIfNeeded(now: now)
+                    return
+                }
+            }
+            if lastDeliveredMessageAt > 0 {
+                deliveredIntervalTotal += (now - lastDeliveredMessageAt)
+                deliveredIntervalCount += 1
+            }
+            lastDeliveredMessageAt = now
+            deliveredEventCount += 1
+            lastReportedProgress = clamped
+            lastReportedAt = now
+            onScrollProgressChange(clamped)
+            emitScrollBridgeSnapshotIfNeeded(now: now)
+        }
+
+        private func emitScrollBridgeSnapshotIfNeeded(now: TimeInterval) {
+            let window = now - diagnosticsWindowStart
+            guard window >= 2.2 else { return }
+            let averageIntervalMs = deliveredIntervalCount > 0
+            ? (deliveredIntervalTotal / Double(deliveredIntervalCount)) * 1000
+            : 0
+            onScrollBridgeSnapshot(
+                ScrollBridgeSnapshot(
+                    windowSeconds: window,
+                    rawEventCount: rawEventCount,
+                    deliveredEventCount: deliveredEventCount,
+                    droppedEventCount: droppedEventCount,
+                    averageDeliveredIntervalMs: averageIntervalMs
+                )
+            )
+
+            diagnosticsWindowStart = now
+            rawEventCount = 0
+            deliveredEventCount = 0
+            droppedEventCount = 0
+            deliveredIntervalTotal = 0
+            deliveredIntervalCount = 0
         }
     }
 }
 #endif
 
 private enum HTMLText {
-    static func makePreview(from raw: String) -> String {
-        let withoutTags = raw.replacingOccurrences(
+    private static let previewCache = NSCache<NSString, NSString>()
+    private static let maxSourceCharacters = 12_000
+    private static let maxPreviewCharacters = 360
+
+    static func makePreview(from raw: String, cacheKey: String? = nil) -> String {
+        if let cacheKey, let cached = previewCache.object(forKey: cacheKey as NSString) {
+            return cached as String
+        }
+
+        let scopedRaw: String
+        if raw.count > maxSourceCharacters {
+            scopedRaw = String(raw.prefix(maxSourceCharacters))
+        } else {
+            scopedRaw = raw
+        }
+
+        let withoutTags = scopedRaw.replacingOccurrences(
             of: "<[^>]+>",
             with: " ",
             options: .regularExpression
@@ -4721,7 +6247,15 @@ private enum HTMLText {
             with: " ",
             options: .regularExpression
         )
-        return compacted.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = compacted.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = trimmed.count > maxPreviewCharacters
+        ? String(trimmed.prefix(maxPreviewCharacters))
+        : trimmed
+
+        if let cacheKey {
+            previewCache.setObject(preview as NSString, forKey: cacheKey as NSString)
+        }
+        return preview
     }
 
     private static func decodeEntities(_ text: String) -> String {
@@ -4743,6 +6277,10 @@ private struct FeedFormView: View {
     @State private var useProxy: Bool
     @State private var useProxyForContent: Bool
     @State private var allowInsecureHTTPForContent: Bool
+    @State private var proxySourceMode: FeedProxySourceMode
+    @State private var contentProxySourceMode: FeedProxySourceMode
+    @State private var selectedProxyProfileUUIDString: String
+    @State private var selectedContentProxyProfileUUIDString: String
     @State private var proxyType: FeedProxyType
     @State private var proxyHost: String
     @State private var proxyPortString: String
@@ -4758,6 +6296,10 @@ private struct FeedFormView: View {
     let initialUseProxy: Bool
     let initialUseProxyForContent: Bool
     let initialAllowInsecureHTTPForContent: Bool
+    let initialProxySourceMode: FeedProxySourceMode
+    let initialContentProxySourceMode: FeedProxySourceMode
+    let initialProxyProfileID: UUID?
+    let initialContentProxyProfileID: UUID?
     let initialProxyType: FeedProxyType
     let initialProxyHost: String
     let initialProxyPort: Int?
@@ -4766,6 +6308,8 @@ private struct FeedFormView: View {
     let initialOfflinePolicy: FeedOfflinePolicy
     let initialFolderName: String
     let availableFolderNames: [String]
+    let proxyProfiles: [ProxyProfile]
+    let maxProxyProfileCount: Int
     let onSave: (FeedFormValues) -> Void
 
     init(
@@ -4776,6 +6320,10 @@ private struct FeedFormView: View {
         initialUseProxy: Bool,
         initialUseProxyForContent: Bool,
         initialAllowInsecureHTTPForContent: Bool,
+        initialProxySourceMode: FeedProxySourceMode,
+        initialContentProxySourceMode: FeedProxySourceMode,
+        initialProxyProfileID: UUID?,
+        initialContentProxyProfileID: UUID?,
         initialProxyType: FeedProxyType,
         initialProxyHost: String,
         initialProxyPort: Int?,
@@ -4784,6 +6332,8 @@ private struct FeedFormView: View {
         initialOfflinePolicy: FeedOfflinePolicy,
         initialFolderName: String,
         availableFolderNames: [String],
+        proxyProfiles: [ProxyProfile],
+        maxProxyProfileCount: Int,
         onSave: @escaping (FeedFormValues) -> Void
     ) {
         self.modeTitle = modeTitle
@@ -4793,6 +6343,10 @@ private struct FeedFormView: View {
         self.initialUseProxy = initialUseProxy
         self.initialUseProxyForContent = initialUseProxyForContent
         self.initialAllowInsecureHTTPForContent = initialAllowInsecureHTTPForContent
+        self.initialProxySourceMode = initialProxySourceMode
+        self.initialContentProxySourceMode = initialContentProxySourceMode
+        self.initialProxyProfileID = initialProxyProfileID
+        self.initialContentProxyProfileID = initialContentProxyProfileID
         self.initialProxyType = initialProxyType
         self.initialProxyHost = initialProxyHost
         self.initialProxyPort = initialProxyPort
@@ -4801,12 +6355,18 @@ private struct FeedFormView: View {
         self.initialOfflinePolicy = initialOfflinePolicy
         self.initialFolderName = initialFolderName
         self.availableFolderNames = availableFolderNames
+        self.proxyProfiles = proxyProfiles
+        self.maxProxyProfileCount = maxProxyProfileCount
         self.onSave = onSave
         _title = State(initialValue: initialTitle)
         _urlString = State(initialValue: initialURLString)
         _useProxy = State(initialValue: initialUseProxy)
         _useProxyForContent = State(initialValue: initialUseProxyForContent)
         _allowInsecureHTTPForContent = State(initialValue: initialAllowInsecureHTTPForContent)
+        _proxySourceMode = State(initialValue: initialProxySourceMode)
+        _contentProxySourceMode = State(initialValue: initialContentProxySourceMode)
+        _selectedProxyProfileUUIDString = State(initialValue: initialProxyProfileID?.uuidString ?? "")
+        _selectedContentProxyProfileUUIDString = State(initialValue: initialContentProxyProfileID?.uuidString ?? "")
         _proxyType = State(initialValue: initialProxyType)
         _proxyHost = State(initialValue: initialProxyHost)
         _proxyPortString = State(initialValue: initialProxyPort.map(String.init) ?? "")
@@ -4882,33 +6442,80 @@ private struct FeedFormView: View {
 
             Section("Network") {
                 Toggle("Use Proxy for Feed URL Access", isOn: $useProxy)
-                Toggle("Use Proxy for Content Access", isOn: $useProxyForContent)
-
-                if useProxy || useProxyForContent {
-                    Picker("Proxy Type", selection: $proxyType) {
-                        ForEach(FeedProxyType.allCases) { type in
-                            Text(type.displayName).tag(type)
+                if useProxy {
+                    Picker("Feed URL Proxy Source", selection: $proxySourceMode) {
+                        ForEach(FeedProxySourceMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
                         }
                     }
+                }
 
-                    TextField("Proxy Host", text: $proxyHost)
-                    #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                    #endif
-                        .autocorrectionDisabled()
+                Toggle("Use Proxy for Content Access", isOn: $useProxyForContent)
+                if useProxyForContent {
+                    Picker("Content Proxy Source", selection: $contentProxySourceMode) {
+                        ForEach(FeedProxySourceMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                }
 
-                    TextField("Proxy Port", text: $proxyPortString)
-                    #if os(iOS)
-                        .keyboardType(.numberPad)
-                    #endif
+                if useProxy || useProxyForContent {
+                    if (useProxy && proxySourceMode == .profile) || (useProxyForContent && contentProxySourceMode == .profile) {
+                        if proxyProfiles.isEmpty {
+                            Text("No saved proxy profiles yet. Use Custom, or create one in Proxy Profiles.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            if useProxy && proxySourceMode == .profile {
+                                Picker("Feed URL Profile", selection: $selectedProxyProfileUUIDString) {
+                                    Text("Select Profile").tag("")
+                                    ForEach(proxyProfiles) { profile in
+                                        Text(profile.name).tag(profile.id.uuidString)
+                                    }
+                                }
+                            }
 
-                    TextField("Proxy Username (Optional)", text: $proxyUsername)
-                    #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                    #endif
-                        .autocorrectionDisabled()
+                            if useProxyForContent && contentProxySourceMode == .profile {
+                                Picker("Content Profile", selection: $selectedContentProxyProfileUUIDString) {
+                                    Text("Select Profile").tag("")
+                                    ForEach(proxyProfiles) { profile in
+                                        Text(profile.name).tag(profile.id.uuidString)
+                                    }
+                                }
+                            }
+                        }
 
-                    SecureField("Proxy Password (Optional)", text: $proxyPassword)
+                        Text("Saved profiles: \(proxyProfiles.count)/\(maxProxyProfileCount). Manage profiles from the main toolbar.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if (useProxy && proxySourceMode == .custom) || (useProxyForContent && contentProxySourceMode == .custom) {
+                        Picker("Custom Proxy Type", selection: $proxyType) {
+                            ForEach(FeedProxyType.allCases) { type in
+                                Text(type.displayName).tag(type)
+                            }
+                        }
+
+                        TextField("Custom Proxy Host", text: $proxyHost)
+                        #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                        #endif
+                            .autocorrectionDisabled()
+
+                        TextField("Custom Proxy Port", text: $proxyPortString)
+                        #if os(iOS)
+                            .keyboardType(.numberPad)
+                        #endif
+
+                        TextField("Custom Proxy Username (Optional)", text: $proxyUsername)
+                        #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                        #endif
+                            .autocorrectionDisabled()
+
+                        SecureField("Custom Proxy Password (Optional)", text: $proxyPassword)
+                    }
                 }
             }
 
@@ -4939,6 +6546,10 @@ private struct FeedFormView: View {
                 useProxy: useProxy,
                 useProxyForContent: useProxyForContent,
                 allowInsecureHTTPForContent: allowInsecureHTTPForContent,
+                proxySourceMode: proxySourceMode,
+                contentProxySourceMode: contentProxySourceMode,
+                proxyProfileID: UUID(uuidString: selectedProxyProfileUUIDString),
+                contentProxyProfileID: UUID(uuidString: selectedContentProxyProfileUUIDString),
                 proxyType: proxyType,
                 proxyHost: proxyHost,
                 proxyPort: Int(proxyPortString),
@@ -4949,6 +6560,576 @@ private struct FeedFormView: View {
             )
         )
         dismiss()
+    }
+}
+
+private struct ProxyProfilesManagerView: View {
+    @Environment(\.dismiss) private var dismiss
+    let profiles: [ProxyProfile]
+    let maxProfileCount: Int
+    let profileUsageCount: (ProxyProfile) -> Int
+    let onCreate: (ProxyProfileFormValues) -> String?
+    let onUpdate: (PersistentIdentifier, ProxyProfileFormValues) -> String?
+    let onDelete: (PersistentIdentifier) -> String?
+
+    @State private var addDraft: ProxyProfileEditDraft?
+    @State private var editDraft: ProxyProfileEditDraft?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+            Divider()
+            footer
+        }
+        .frame(width: 700, height: 500)
+        .alert("Proxy Profiles", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+        .sheet(item: $addDraft) { draft in
+            ProxyProfileFormView(
+                modeTitle: "New Proxy Profile",
+                saveButtonTitle: "Create",
+                initialName: draft.name,
+                initialProxyType: draft.proxyType,
+                initialProxyHost: draft.proxyHost,
+                initialProxyPort: draft.proxyPort,
+                initialProxyUsername: draft.proxyUsername,
+                initialProxyPassword: draft.proxyPassword
+            ) { values in
+                if let error = onCreate(values) {
+                    errorMessage = error
+                }
+            }
+            .presentationSizing(.fitted)
+        }
+        .sheet(item: $editDraft) { draft in
+            ProxyProfileFormView(
+                modeTitle: "Edit Proxy Profile",
+                saveButtonTitle: "Save",
+                initialName: draft.name,
+                initialProxyType: draft.proxyType,
+                initialProxyHost: draft.proxyHost,
+                initialProxyPort: draft.proxyPort,
+                initialProxyUsername: draft.proxyUsername,
+                initialProxyPassword: draft.proxyPassword
+            ) { values in
+                guard let profileID = draft.profileID else { return }
+                if let error = onUpdate(profileID, values) {
+                    errorMessage = error
+                }
+            }
+            .presentationSizing(.fitted)
+        }
+        #else
+        NavigationStack {
+            content
+                .navigationTitle("Proxy Profiles")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            beginCreate()
+                        } label: {
+                            Label("New", systemImage: "plus")
+                        }
+                        .disabled(profiles.count >= maxProfileCount)
+                    }
+                }
+        }
+        .alert("Proxy Profiles", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage ?? "")
+        }
+        .sheet(item: $addDraft) { draft in
+            ProxyProfileFormView(
+                modeTitle: "New Proxy Profile",
+                saveButtonTitle: "Create",
+                initialName: draft.name,
+                initialProxyType: draft.proxyType,
+                initialProxyHost: draft.proxyHost,
+                initialProxyPort: draft.proxyPort,
+                initialProxyUsername: draft.proxyUsername,
+                initialProxyPassword: draft.proxyPassword
+            ) { values in
+                if let error = onCreate(values) {
+                    errorMessage = error
+                }
+            }
+        }
+        .sheet(item: $editDraft) { draft in
+            ProxyProfileFormView(
+                modeTitle: "Edit Proxy Profile",
+                saveButtonTitle: "Save",
+                initialName: draft.name,
+                initialProxyType: draft.proxyType,
+                initialProxyHost: draft.proxyHost,
+                initialProxyPort: draft.proxyPort,
+                initialProxyUsername: draft.proxyUsername,
+                initialProxyPassword: draft.proxyPassword
+            ) { values in
+                guard let profileID = draft.profileID else { return }
+                if let error = onUpdate(profileID, values) {
+                    errorMessage = error
+                }
+            }
+        }
+        #endif
+    }
+
+    private var header: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Proxy Profiles")
+                    .font(.headline)
+                Text("Reusable proxy settings (\(profiles.count)/\(maxProfileCount))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                beginCreate()
+            } label: {
+                Label("New", systemImage: "plus")
+            }
+            .disabled(profiles.count >= maxProfileCount)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var content: some View {
+        Group {
+            if profiles.isEmpty {
+                ContentUnavailableView(
+                    "No Proxy Profiles",
+                    systemImage: "network.badge.shield.half.filled",
+                    description: Text("Create up to \(maxProfileCount) saved proxy profiles and reuse them per feed.")
+                )
+            } else {
+                List {
+                    ForEach(profiles) { profile in
+                        let usageCount = profileUsageCount(profile)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(profile.name)
+                                    .font(.headline)
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                if usageCount > 0 {
+                                    Text("In use: \(usageCount)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+
+                            Text("\(profile.proxyType.displayName) • \(profile.proxyHost):\(profile.proxyPort.map(String.init) ?? "-")")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+
+                            if !profile.proxyUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("User: \(profile.proxyUsername)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+
+                            HStack {
+                                Button {
+                                    editDraft = ProxyProfileEditDraft(
+                                        profileID: profile.persistentModelID,
+                                        name: profile.name,
+                                        proxyType: profile.proxyType,
+                                        proxyHost: profile.proxyHost,
+                                        proxyPort: profile.proxyPort,
+                                        proxyUsername: profile.proxyUsername,
+                                        proxyPassword: profile.proxyPasswordValue
+                                    )
+                                } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                                .buttonStyle(.borderless)
+
+                                Button(role: .destructive) {
+                                    if let message = onDelete(profile.persistentModelID) {
+                                        errorMessage = message
+                                    }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(usageCount > 0)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Text("Passwords are stored securely in Keychain and not exported in backups.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Done") { dismiss() }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private func beginCreate() {
+        addDraft = ProxyProfileEditDraft(
+            profileID: nil,
+            name: "",
+            proxyType: .http,
+            proxyHost: "",
+            proxyPort: nil,
+            proxyUsername: "",
+            proxyPassword: ""
+        )
+    }
+}
+
+private struct ProxyProfileFormView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name: String
+    @State private var proxyType: FeedProxyType
+    @State private var proxyHost: String
+    @State private var proxyPortString: String
+    @State private var proxyUsername: String
+    @State private var proxyPassword: String
+
+    let modeTitle: String
+    let saveButtonTitle: String
+    let initialName: String
+    let initialProxyType: FeedProxyType
+    let initialProxyHost: String
+    let initialProxyPort: Int?
+    let initialProxyUsername: String
+    let initialProxyPassword: String
+    let onSave: (ProxyProfileFormValues) -> Void
+
+    init(
+        modeTitle: String,
+        saveButtonTitle: String,
+        initialName: String,
+        initialProxyType: FeedProxyType,
+        initialProxyHost: String,
+        initialProxyPort: Int?,
+        initialProxyUsername: String,
+        initialProxyPassword: String,
+        onSave: @escaping (ProxyProfileFormValues) -> Void
+    ) {
+        self.modeTitle = modeTitle
+        self.saveButtonTitle = saveButtonTitle
+        self.initialName = initialName
+        self.initialProxyType = initialProxyType
+        self.initialProxyHost = initialProxyHost
+        self.initialProxyPort = initialProxyPort
+        self.initialProxyUsername = initialProxyUsername
+        self.initialProxyPassword = initialProxyPassword
+        self.onSave = onSave
+        _name = State(initialValue: initialName)
+        _proxyType = State(initialValue: initialProxyType)
+        _proxyHost = State(initialValue: initialProxyHost)
+        _proxyPortString = State(initialValue: initialProxyPort.map(String.init) ?? "")
+        _proxyUsername = State(initialValue: initialProxyUsername)
+        _proxyPassword = State(initialValue: initialProxyPassword)
+    }
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text(modeTitle)
+                    .font(.headline)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            Form {
+                TextField("Profile Name (Optional)", text: $name)
+                Picker("Proxy Type", selection: $proxyType) {
+                    ForEach(FeedProxyType.allCases) { type in
+                        Text(type.displayName).tag(type)
+                    }
+                }
+                TextField("Proxy Host", text: $proxyHost)
+                TextField("Proxy Port", text: $proxyPortString)
+                TextField("Proxy Username (Optional)", text: $proxyUsername)
+                SecureField("Proxy Password (Optional)", text: $proxyPassword)
+            }
+            .formStyle(.grouped)
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(saveButtonTitle) {
+                    onSave(
+                        ProxyProfileFormValues(
+                            name: name,
+                            proxyType: proxyType,
+                            proxyHost: proxyHost,
+                            proxyPort: Int(proxyPortString),
+                            proxyUsername: proxyUsername,
+                            proxyPassword: proxyPassword
+                        )
+                    )
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(12)
+        }
+        .frame(width: 620)
+        #else
+        NavigationStack {
+            Form {
+                TextField("Profile Name (Optional)", text: $name)
+                Picker("Proxy Type", selection: $proxyType) {
+                    ForEach(FeedProxyType.allCases) { type in
+                        Text(type.displayName).tag(type)
+                    }
+                }
+                TextField("Proxy Host", text: $proxyHost)
+                TextField("Proxy Port", text: $proxyPortString)
+                    .keyboardType(.numberPad)
+                TextField("Proxy Username (Optional)", text: $proxyUsername)
+                SecureField("Proxy Password (Optional)", text: $proxyPassword)
+            }
+            .navigationTitle(modeTitle)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saveButtonTitle) {
+                        onSave(
+                            ProxyProfileFormValues(
+                                name: name,
+                                proxyType: proxyType,
+                                proxyHost: proxyHost,
+                                proxyPort: Int(proxyPortString),
+                                proxyUsername: proxyUsername,
+                                proxyPassword: proxyPassword
+                            )
+                        )
+                        dismiss()
+                    }
+                    .disabled(proxyHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        #endif
+    }
+}
+
+private struct PerformanceDiagnosticsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var isEnabled: Bool
+    let samples: [PerformanceSample]
+    let onClear: () -> Void
+
+    private var renderSampleCount: Int {
+        samples.filter { $0.kind == .render }.count
+    }
+
+    private var offlineWriteCount: Int {
+        samples.filter { $0.kind == .offlineWrite }.count
+    }
+
+    private var scrollBridgeCount: Int {
+        samples.filter { $0.kind == .scrollBridge }.count
+    }
+
+    private var progressCommitCount: Int {
+        samples.filter { $0.kind == .progressCommit }.count
+    }
+
+    private var mainThreadLagCount: Int {
+        samples.filter { $0.kind == .mainThreadLag }.count
+    }
+
+    private var articleListScrollCount: Int {
+        samples.filter { $0.kind == .articleListScroll }.count
+    }
+
+    private var articleListMainLagCount: Int {
+        samples.filter { $0.kind == .articleListMainLag }.count
+    }
+
+    var body: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text("Performance Diagnostics")
+                    .font(.headline)
+                Spacer()
+                Toggle("Enabled", isOn: $isEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Label("\(renderSampleCount) render", systemImage: "clock")
+                        .foregroundStyle(.secondary)
+                    Label("\(offlineWriteCount) offline write", systemImage: "internaldrive")
+                        .foregroundStyle(.secondary)
+                    Label("\(scrollBridgeCount) scroll bridge", systemImage: "arrow.left.arrow.right")
+                        .foregroundStyle(.secondary)
+                    Label("\(progressCommitCount) progress commit", systemImage: "bookmark")
+                        .foregroundStyle(.secondary)
+                    Label("\(mainThreadLagCount) main lag", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                    Label("\(articleListScrollCount) list scroll", systemImage: "list.bullet")
+                        .foregroundStyle(.secondary)
+                    Label("\(articleListMainLagCount) list lag", systemImage: "bolt.horizontal.circle")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+
+                if samples.isEmpty {
+                    ContentUnavailableView(
+                        "No Diagnostics Yet",
+                        systemImage: "waveform.path.ecg",
+                        description: Text("Enable diagnostics, then open and scroll some articles.")
+                    )
+                } else {
+                    List(samples) { sample in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text(sample.kind.rawValue)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(String(format: "%.2f ms", sample.durationMs))
+                                    .font(.caption2)
+                                    .monospacedDigit()
+                                if let htmlBytes = sample.htmlBytes {
+                                    Text(ByteCountFormatter.string(fromByteCount: Int64(htmlBytes), countStyle: .file))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(sample.timestamp, style: .time)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(sample.articleTitle)
+                                .lineLimit(1)
+                            Text(sample.detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .frame(minHeight: 260)
+                }
+            }
+            .padding(12)
+
+            Divider()
+            HStack {
+                Button("Clear", role: .destructive) { onClear() }
+                    .disabled(samples.isEmpty)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 640, height: 480)
+        #else
+        NavigationStack {
+            List {
+                Section("Controls") {
+                    Toggle("Enable Diagnostics", isOn: $isEnabled)
+                }
+                Section("Summary") {
+                    Label("\(renderSampleCount) render", systemImage: "clock")
+                    Label("\(offlineWriteCount) offline write", systemImage: "internaldrive")
+                    Label("\(scrollBridgeCount) scroll bridge", systemImage: "arrow.left.arrow.right")
+                    Label("\(progressCommitCount) progress commit", systemImage: "bookmark")
+                    Label("\(mainThreadLagCount) main lag", systemImage: "exclamationmark.triangle")
+                    Label("\(articleListScrollCount) list scroll", systemImage: "list.bullet")
+                    Label("\(articleListMainLagCount) list lag", systemImage: "bolt.horizontal.circle")
+                }
+                Section("Samples") {
+                    if samples.isEmpty {
+                        Text("No diagnostics yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(samples) { sample in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Text(sample.kind.rawValue)
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    Text(String(format: "%.2f ms", sample.durationMs))
+                                        .font(.caption2)
+                                        .monospacedDigit()
+                                    if let htmlBytes = sample.htmlBytes {
+                                        Text(ByteCountFormatter.string(fromByteCount: Int64(htmlBytes), countStyle: .file))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Text(sample.articleTitle)
+                                    .lineLimit(1)
+                                Text(sample.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Diagnostics")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Clear", role: .destructive) { onClear() }
+                        .disabled(samples.isEmpty)
+                }
+            }
+        }
+        #endif
     }
 }
 
