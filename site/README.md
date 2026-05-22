@@ -25,7 +25,7 @@ Edit `config.js`:
 - `dmgSha256Url`
 - `releasesUrl`
 - `repoUrl`
-- `donateUrl` (PayPal)
+- `donateUrl` (optional external support link used by the coffee support card)
 - `feedbackEmail`
 - `issuesUrl`
 - `defaultLanguage` (`en` or `zh`)
