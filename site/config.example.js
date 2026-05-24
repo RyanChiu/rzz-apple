@@ -4,7 +4,7 @@ window.RZZ_SITE_CONFIG = {
   dmgSha256Url: "https://github.com/<owner>/rzz-apple/releases/latest/download/RZZ-latest-macOS.dmg.sha256",
   releasesUrl: "https://github.com/<owner>/rzz-apple/releases",
   repoUrl: "https://github.com/<owner>/rzz-apple",
-  donateUrl: "https://example.com/support",
+  donateUrl: "",
   feedbackEmail: "you@example.com",
   issuesUrl: "https://github.com/<owner>/rzz-apple/issues",
   defaultLanguage: "en"

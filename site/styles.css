@@ -238,95 +238,72 @@ p {
 }
 
 .support-section {
-  padding-top: 18px;
+  padding: 26px 0 42px;
 }
 
 .support-card {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: 28px;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 22px;
   align-items: center;
-  border: 1px solid #e3c58d;
-  border-radius: 18px;
-  padding: 28px;
+  border: 1px solid #cfd9e8;
+  border-radius: 14px;
+  padding: 22px;
   background:
-    linear-gradient(135deg, rgba(255, 248, 232, .94) 0%, rgba(255, 255, 255, .96) 54%),
-    linear-gradient(120deg, #fbdfa4 0%, #f7faff 100%);
-  box-shadow: 0 18px 42px rgba(110, 78, 31, .10);
+    linear-gradient(135deg, rgba(255, 255, 255, .96) 0%, rgba(247, 250, 255, .98) 100%),
+    linear-gradient(120deg, #e8f1ff 0%, #fff8ec 100%);
+  box-shadow: 0 14px 34px rgba(42, 63, 102, .08);
 }
 
-.coffee-visual {
-  min-height: 190px;
+.support-visual {
+  min-height: 126px;
   display: grid;
   place-items: center;
-  border-radius: 14px;
+  border-radius: 12px;
   background:
-    radial-gradient(circle at 54% 20%, rgba(255, 255, 255, .9), transparent 28%),
-    linear-gradient(160deg, #f2c26c 0%, #a96b25 100%);
+    radial-gradient(circle at 72% 20%, rgba(255, 255, 255, .82), transparent 30%),
+    linear-gradient(145deg, #eaf3ff 0%, #f5ddac 100%);
   overflow: hidden;
 }
 
-.coffee-cup {
+.support-emblem {
   position: relative;
-  width: 92px;
-  height: 132px;
-  border-radius: 14px 14px 22px 22px;
-  background: linear-gradient(90deg, #fefefe 0%, #e4e9ef 52%, #ffffff 100%);
-  box-shadow: 0 18px 26px rgba(62, 40, 19, .26);
-  transform: rotate(-8deg);
-}
-
-.coffee-cup::before {
-  content: "";
-  position: absolute;
-  top: -17px;
-  left: -12px;
-  width: 116px;
-  height: 28px;
+  width: 86px;
+  height: 86px;
   border-radius: 999px;
-  background: linear-gradient(180deg, #ffffff 0%, #dfe6ee 100%);
-  box-shadow: 0 5px 10px rgba(65, 47, 26, .14);
-}
-
-.coffee-lid {
-  position: absolute;
-  top: -31px;
-  left: 8px;
-  width: 76px;
-  height: 18px;
-  border-radius: 999px;
-  background: #ffffff;
-  box-shadow: inset 0 -3px 0 #d9e0e8;
-}
-
-.coffee-sleeve {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  top: 48px;
-  height: 44px;
-  border-radius: 10px;
-  background:
-    linear-gradient(135deg, #8a5b2c 0%, #5f381c 100%);
-}
-
-.coffee-sleeve::after {
-  content: "RZZ";
-  position: absolute;
-  inset: 9px 13px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(255, 255, 255, .55);
+  color: #ffffff;
+  background: linear-gradient(145deg, #184eaa 0%, #0a76ff 100%);
+  box-shadow: 0 16px 28px rgba(24, 78, 170, .22);
+}
+
+.support-emblem::before,
+.support-emblem::after {
+  content: "";
+  position: absolute;
+  border: 1px solid rgba(24, 78, 170, .22);
   border-radius: 999px;
-  color: #fff8ec;
-  font-size: 13px;
+}
+
+.support-emblem::before {
+  inset: -12px;
+}
+
+.support-emblem::after {
+  inset: -24px;
+  opacity: .56;
+}
+
+.support-emblem span {
+  font-size: 18px;
   font-weight: 800;
-  letter-spacing: .06em;
+  letter-spacing: .04em;
 }
 
 .support-kicker {
   margin-bottom: 8px;
-  color: #9b641f;
+  color: #3d5f99;
   font-size: 13px;
   font-weight: 800;
   letter-spacing: .08em;
@@ -345,20 +322,30 @@ p {
   margin-top: 18px;
 }
 
-.btn.coffee {
+.btn.support-button {
   color: #fff;
-  border-color: #9f5d16;
-  background: linear-gradient(180deg, #d78a2d 0%, #a85f15 100%);
-  box-shadow: 0 8px 18px rgba(142, 83, 18, .24);
+  border-color: #184eaa;
+  background: linear-gradient(180deg, #2b82f6 0%, #184eaa 100%);
+  box-shadow: 0 8px 18px rgba(24, 78, 170, .20);
 }
 
-.btn.coffee:hover {
+.btn.support-button:hover {
   transform: translateY(-1px);
-  background: linear-gradient(180deg, #e09534 0%, #95520e 100%);
+  background: linear-gradient(180deg, #338bff 0%, #164897 100%);
+}
+
+.btn.support-button.disabled,
+.btn.support-button.disabled:hover {
+  cursor: default;
+  color: #63728a;
+  border-color: #d2dce9;
+  background: #eef3fa;
+  box-shadow: none;
+  transform: none;
 }
 
 .support-note {
-  color: #826b52;
+  color: #68788f;
   font-size: 13px;
   line-height: 1.5;
 }
@@ -402,8 +389,8 @@ p {
     padding: 20px;
   }
 
-  .coffee-visual {
-    min-height: 150px;
+  .support-visual {
+    min-height: 126px;
   }
 }
 
@@ -413,7 +400,7 @@ p {
     flex-direction: column;
   }
 
-  .btn.coffee {
+  .btn.support-button {
     width: 100%;
   }
 }

@@ -5,7 +5,7 @@
     dmgSha256Url: "",
     releasesUrl: "#",
     repoUrl: "#",
-    donateUrl: "#",
+    donateUrl: "",
     feedbackEmail: "feedback@example.com",
     issuesUrl: "#",
     defaultLanguage: "en"
@@ -21,6 +21,7 @@
       subtitle_html: "A lightweight RSS reader for macOS.<br />Custom feeds, flexible per-feed network settings, offline cache, and smooth reading.",
       cta_download: "Download DMG Trial",
       cta_releases: "Release Notes",
+      cta_support: "Support RZZ",
       checksum_label: "SHA256:",
       checksum_file_label: "download .sha256",
       hero_meta_html: "Distribution channel: GitHub Release + DMG.<br />Donation is optional and does not affect feature access.",
@@ -44,11 +45,12 @@
       step_3: "Optionally configure per-feed network access preferences for feed URL and content loading.",
       step_4: "Read articles in rendered mode, then star/tag/filter for your workflow.",
       step_5: "Use import/export backup for migration or device change.",
-      support_kicker: "Optional support",
-      support_title: "Enjoy RZZ? Buy me a coffee.",
-      support_desc: "RZZ is maintained independently. A small coffee-sized contribution helps cover signing, hosting, testing devices, and the quiet hours that make the reader better.",
-      support_cta: "Buy a Coffee",
-      support_note: "Voluntary. No account or feature access changes.",
+      support_kicker: "Independent development",
+      support_title: "Support RZZ's continued development",
+      support_desc: "RZZ is built and maintained independently. Optional support helps cover code signing, hosting, compatibility testing, and the time needed to keep the reader reliable.",
+      support_cta: "Support RZZ",
+      support_note_ready: "Voluntary support. It does not change feature access or support priority.",
+      support_note_pending: "Official support link coming soon. No payment link is active yet.",
       feedback_title: "Feedback & Contact",
       feedback_email_label: "Questions or suggestions: ",
       feedback_repo_label: "GitHub repository: ",
@@ -64,6 +66,7 @@
       subtitle_html: "面向 macOS 的轻量 RSS 阅读器。<br />自定义源、按源网络访问设置、离线缓存、流畅阅读。",
       cta_download: "下载 DMG 试用版",
       cta_releases: "更新日志",
+      cta_support: "支持 RZZ",
       checksum_label: "SHA256：",
       checksum_file_label: "下载 .sha256",
       hero_meta_html: "分发渠道：GitHub Release + DMG。<br />Donate 为自愿支持，不影响功能使用。",
@@ -87,11 +90,12 @@
       step_3: "按需配置网络访问偏好：Feed URL 访问与正文访问可分别设置。",
       step_4: "在渲染模式阅读文章，并用星标/标签/过滤器组织内容。",
       step_5: "设备迁移或重装时使用导入/导出备份。",
-      support_kicker: "自愿支持",
-      support_title: "喜欢 RZZ？请我喝杯咖啡。",
-      support_desc: "RZZ 是独立维护的项目。一杯咖啡大小的支持，可以帮忙覆盖签名、托管、测试设备，以及继续打磨阅读体验所需要的安静时间。",
-      support_cta: "买杯咖啡支持",
-      support_note: "完全自愿，不影响账号、功能或使用权限。",
+      support_kicker: "独立开发",
+      support_title: "支持 RZZ 持续开发",
+      support_desc: "RZZ 是独立开发和维护的项目。自愿支持将用于代码签名、网站托管、兼容性测试，以及持续改进阅读体验所需要的时间投入。",
+      support_cta: "支持 RZZ",
+      support_note_ready: "自愿支持，不影响功能使用，也不改变支持优先级。",
+      support_note_pending: "正式支持链接稍后开放，目前不会跳转到任何收款页面。",
       feedback_title: "反馈与联系",
       feedback_email_label: "问题与建议：",
       feedback_repo_label: "GitHub 仓库：",
@@ -102,9 +106,15 @@
     }
   };
 
+  function hasConfiguredDonateUrl() {
+    const value = (cfg.donateUrl || "").trim();
+    return value.length > 0 && value !== "#";
+  }
+
   function applyLinks() {
     const download = document.getElementById("link-download");
     const releases = document.getElementById("link-releases");
+    const supportHero = document.getElementById("link-support-hero");
     const donate = document.getElementById("link-donate");
     const checksumValue = document.getElementById("checksum-value");
     const checksumFile = document.getElementById("link-checksum-file");
@@ -114,7 +124,21 @@
 
     download.href = cfg.dmgUrl;
     releases.href = cfg.releasesUrl;
-    donate.href = cfg.donateUrl;
+    if (hasConfiguredDonateUrl()) {
+      supportHero.href = cfg.donateUrl;
+      supportHero.target = "_blank";
+      supportHero.rel = "noopener noreferrer";
+      donate.href = cfg.donateUrl;
+      donate.classList.remove("disabled");
+      donate.removeAttribute("aria-disabled");
+    } else {
+      supportHero.href = "#support";
+      supportHero.removeAttribute("target");
+      supportHero.removeAttribute("rel");
+      donate.removeAttribute("href");
+      donate.classList.add("disabled");
+      donate.setAttribute("aria-disabled", "true");
+    }
     checksumValue.textContent = cfg.dmgSha256 || "-";
     if (cfg.dmgSha256Url) {
       checksumFile.href = cfg.dmgSha256Url;
@@ -129,6 +153,12 @@
     repo.textContent = cfg.repoUrl;
     issues.href = cfg.issuesUrl;
     issues.textContent = cfg.issuesUrl;
+  }
+
+  function applySupportNote(lang) {
+    const dict = i18n[lang] || i18n.en;
+    const note = document.getElementById("support-note");
+    note.textContent = hasConfiguredDonateUrl() ? dict.support_note_ready : dict.support_note_pending;
   }
 
   function setLanguage(lang) {
@@ -153,6 +183,7 @@
     enBtn.classList.toggle("active", lang === "en");
     zhBtn.classList.toggle("active", lang === "zh");
 
+    applySupportNote(lang);
     localStorage.setItem("rzz_site_lang", lang);
   }
 
