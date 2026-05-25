@@ -137,6 +137,18 @@ h1 {
   background: #f5f9ff;
 }
 
+.btn.support-hero {
+  color: #7a4d10;
+  border-color: #e5c278;
+  background: #fff8ec;
+  box-shadow: 0 5px 16px rgba(121, 80, 20, .10);
+}
+
+.btn.support-hero:hover {
+  background: #fff2d9;
+  transform: translateY(-1px);
+}
+
 .meta {
   margin: 18px 0 0;
   color: #6d7d96;
@@ -238,7 +250,7 @@ p {
 }
 
 .support-section {
-  padding: 26px 0 42px;
+  padding: 34px 0 42px;
 }
 
 .support-card {

@@ -47,9 +47,9 @@
       step_5: "Use import/export backup for migration or device change.",
       support_kicker: "Independent development",
       support_title: "Support independent development",
-      support_desc: "RZZ is built and maintained independently. Optional support helps cover code signing, hosting, compatibility testing, and the care needed to keep the reader reliable.",
+      support_desc: "If RZZ is useful to you, optional support helps cover code signing, hosting, compatibility testing, and the care needed to keep the reader reliable.",
       support_cta: "Support RZZ",
-      support_note_ready: "Voluntary support. It does not change feature access or support priority.",
+      support_note_ready: "Voluntary support. Ko-fi may require international network access on some networks.",
       support_note_pending: "Official support link coming soon. No payment link is active yet.",
       feedback_title: "Feedback & Contact",
       feedback_email_label: "Questions or suggestions: ",
@@ -92,9 +92,9 @@
       step_5: "设备迁移或重装时使用导入/导出备份。",
       support_kicker: "独立开发",
       support_title: "支持独立开发",
-      support_desc: "RZZ 是独立开发和维护的项目。自愿支持将用于代码签名、网站托管、兼容性测试，以及维持可靠阅读体验所需要的投入。",
+      support_desc: "如果 RZZ 对你有帮助，自愿支持将用于代码签名、网站托管、兼容性测试，以及维持可靠阅读体验所需要的投入。",
       support_cta: "支持 RZZ",
-      support_note_ready: "自愿支持，不影响功能使用，也不改变支持优先级。",
+      support_note_ready: "自愿支持，不影响功能使用；Ko-fi 在部分网络可能需要国际网络访问。",
       support_note_pending: "正式支持链接稍后开放，目前不会跳转到任何收款页面。",
       feedback_title: "反馈与联系",
       feedback_email_label: "问题与建议：",
@@ -124,17 +124,14 @@
 
     download.href = cfg.dmgUrl;
     releases.href = cfg.releasesUrl;
+    supportHero.href = "#support";
+    supportHero.removeAttribute("target");
+    supportHero.removeAttribute("rel");
     if (hasConfiguredDonateUrl()) {
-      supportHero.href = cfg.donateUrl;
-      supportHero.target = "_blank";
-      supportHero.rel = "noopener noreferrer";
       donate.href = cfg.donateUrl;
       donate.classList.remove("disabled");
       donate.removeAttribute("aria-disabled");
     } else {
-      supportHero.href = "#support";
-      supportHero.removeAttribute("target");
-      supportHero.removeAttribute("rel");
       donate.removeAttribute("href");
       donate.classList.add("disabled");
       donate.setAttribute("aria-disabled", "true");
