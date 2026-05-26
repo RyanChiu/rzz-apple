@@ -483,6 +483,14 @@ struct ContentView: View {
         #endif
     }
 
+    private var isPerformanceDiagnosticsActive: Bool {
+        #if DEBUG
+        return debugPerfDiagnosticsEnabled && !shouldPauseBackgroundWorkForMenuBar
+        #else
+        return false
+        #endif
+    }
+
     private var feedScopeSummary: String {
         if isAllFeedsSelected || selectedFeedIDs.isEmpty {
             return "All feeds selected"
@@ -1359,7 +1367,7 @@ struct ContentView: View {
                         stopArticleListLagMonitor()
                     }
                     .onChange(of: debugPerfDiagnosticsEnabled) { _, isEnabled in
-                        if isEnabled {
+                        if isEnabled && !shouldPauseBackgroundWorkForMenuBar {
                             startArticleListLagMonitorIfNeeded()
                         } else {
                             stopArticleListLagMonitor()
@@ -1580,7 +1588,7 @@ struct ContentView: View {
             }
 
             #if DEBUG
-            if debugPerfDiagnosticsEnabled {
+            if isPerformanceDiagnosticsActive {
                 Divider()
                     .frame(height: 14)
                 Button {
@@ -1663,7 +1671,7 @@ struct ContentView: View {
 
     private func recordPerformanceSample(_ sample: PerformanceSample) {
         #if DEBUG
-        guard debugPerfDiagnosticsEnabled else { return }
+        guard isPerformanceDiagnosticsActive else { return }
         var updated = performanceSamples
         updated.insert(sample, at: 0)
         if updated.count > maxPerformanceSampleCount {
@@ -1753,7 +1761,7 @@ struct ContentView: View {
                 ArticleDetailView(
                     article: selectedArticle,
                     tags: tags,
-                    isPerformanceDiagnosticsEnabled: debugPerfDiagnosticsEnabled,
+                    isPerformanceDiagnosticsEnabled: isPerformanceDiagnosticsActive,
                     contentProxyResolver: { feed in
                         resolvedContentProxy(for: feed)
                     },
@@ -1967,7 +1975,7 @@ struct ContentView: View {
 
     private func recordArticleListRowAppearance(articleID: PersistentIdentifier) {
         #if DEBUG
-        guard debugPerfDiagnosticsEnabled else { return }
+        guard isPerformanceDiagnosticsActive else { return }
         guard let index = displayedArticleIndexMap[articleID] else { return }
 
         let now = ProcessInfo.processInfo.systemUptime
@@ -2018,7 +2026,7 @@ struct ContentView: View {
 
     private func startArticleListLagMonitorIfNeeded() {
         #if DEBUG
-        guard debugPerfDiagnosticsEnabled else { return }
+        guard isPerformanceDiagnosticsActive else { return }
         stopArticleListLagMonitor()
         articleListDiagnosticsBuffer.lagMonitorTask = Task(priority: .utility) {
             while !Task.isCancelled {
@@ -2377,7 +2385,7 @@ struct ContentView: View {
             return
         }
 
-        let orderedFeeds = orderedFeedsForLaunchRefresh()
+        let orderedFeeds = orderedFeedsForLaunchRefresh(staleFeeds)
         guard !orderedFeeds.isEmpty else { return }
 
         beginLaunchRefreshStatus(
@@ -2430,13 +2438,13 @@ struct ContentView: View {
         }
     }
 
-    private func orderedFeedsForLaunchRefresh() -> [Feed] {
-        guard !feeds.isEmpty else { return [] }
-        guard !isAllFeedsSelected, !selectedFeedIDs.isEmpty else { return feeds }
+    private func orderedFeedsForLaunchRefresh(_ candidates: [Feed]) -> [Feed] {
+        guard !candidates.isEmpty else { return [] }
+        guard !isAllFeedsSelected, !selectedFeedIDs.isEmpty else { return candidates }
 
-        let selected = feeds.filter { selectedFeedIDs.contains($0.persistentModelID) }
+        let selected = candidates.filter { selectedFeedIDs.contains($0.persistentModelID) }
         let selectedIDSet = Set(selected.map(\.persistentModelID))
-        let rest = feeds.filter { !selectedIDSet.contains($0.persistentModelID) }
+        let rest = candidates.filter { !selectedIDSet.contains($0.persistentModelID) }
         return selected + rest
     }
 
@@ -2470,6 +2478,7 @@ struct ContentView: View {
     @MainActor
     private func handleMenuBarHiddenModeChanged(_ isHiddenToMenuBar: Bool) {
         if isHiddenToMenuBar {
+            stopArticleListLagMonitor()
             launchAutoRefreshTask?.cancel()
             launchAutoRefreshTask = nil
             didScheduleLaunchAutoRefresh = false
@@ -2481,6 +2490,7 @@ struct ContentView: View {
 
         scheduleLaunchAutoRefreshIfNeeded()
         pumpOfflineCachingQueueIfPossible()
+        startArticleListLagMonitorIfNeeded()
     }
 
     @MainActor
