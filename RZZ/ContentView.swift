@@ -281,7 +281,7 @@ struct ContentView: View {
     @AppStorage("last_selected_article_uuid_starred") private var lastSelectedArticleUUIDStarredString = ""
     @AppStorage("last_selected_tag_uuid") private var lastSelectedTagUUIDString = ""
     @AppStorage("custom_feed_folder_names_json") private var customFeedFolderNamesJSON = "[]"
-    @AppStorage("auto_refresh_on_launch") private var autoRefreshOnLaunch = true
+    @AppStorage("auto_refresh_on_launch") private var autoRefreshOnLaunch = false
     @AppStorage("last_refresh_status_summary") private var lastRefreshStatusSummary = "Never refreshed"
     @AppStorage("last_refresh_status_at") private var lastRefreshStatusAt = 0.0
     @AppStorage("article_list_column_visible") private var articleListColumnVisible = true
@@ -955,7 +955,8 @@ struct ContentView: View {
                 AppLockSettingsView(
                     isEnabled: $appLockEnabled,
                     pinHash: $appLockPINHash,
-                    appThemeModeRaw: $appThemeModeRaw
+                    appThemeModeRaw: $appThemeModeRaw,
+                    autoRefreshOnLaunch: $autoRefreshOnLaunch
                 )
                 #if os(macOS)
                 .presentationSizing(.fitted)

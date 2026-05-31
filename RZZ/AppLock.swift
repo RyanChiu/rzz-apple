@@ -250,12 +250,14 @@ struct AppLockSettingsView: View {
     @Binding var isEnabled: Bool
     @Binding var pinHash: String
     @Binding var appThemeModeRaw: String
+    @Binding var autoRefreshOnLaunch: Bool
 
     @Environment(\.dismiss) private var dismiss
 
     @State private var draftIsEnabled: Bool
     @State private var draftPINHash: String
     @State private var draftThemeModeRaw: String
+    @State private var draftAutoRefreshOnLaunch: Bool
     @State private var currentPIN = ""
     @State private var newPIN = ""
     @State private var confirmPIN = ""
@@ -263,14 +265,21 @@ struct AppLockSettingsView: View {
     @State private var isErrorMessage = false
     @State private var draftPINLength: Int
 
-    init(isEnabled: Binding<Bool>, pinHash: Binding<String>, appThemeModeRaw: Binding<String>) {
+    init(
+        isEnabled: Binding<Bool>,
+        pinHash: Binding<String>,
+        appThemeModeRaw: Binding<String>,
+        autoRefreshOnLaunch: Binding<Bool>
+    ) {
         _isEnabled = isEnabled
         _pinHash = pinHash
         _appThemeModeRaw = appThemeModeRaw
+        _autoRefreshOnLaunch = autoRefreshOnLaunch
         _draftIsEnabled = State(initialValue: isEnabled.wrappedValue)
         _draftPINHash = State(initialValue: pinHash.wrappedValue)
         let initialTheme = AppThemeMode(rawValue: appThemeModeRaw.wrappedValue) ?? .system
         _draftThemeModeRaw = State(initialValue: initialTheme.rawValue)
+        _draftAutoRefreshOnLaunch = State(initialValue: autoRefreshOnLaunch.wrappedValue)
         _draftPINLength = State(initialValue: AppLockPINLengthStore.readLength() ?? 0)
     }
 
@@ -359,6 +368,13 @@ struct AppLockSettingsView: View {
                 .pickerStyle(.segmented)
             }
 
+            Section("Refresh") {
+                Toggle("Refresh feeds on launch", isOn: $draftAutoRefreshOnLaunch)
+                Text("When enabled, RZZ refreshes feeds that have not been updated recently after launch.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if let message {
                 Section {
                     Text(message)
@@ -390,6 +406,7 @@ struct AppLockSettingsView: View {
         }
 
         appThemeModeRaw = AppThemeMode(rawValue: draftThemeModeRaw)?.rawValue ?? AppThemeMode.system.rawValue
+        autoRefreshOnLaunch = draftAutoRefreshOnLaunch
         isEnabled = draftIsEnabled
         if !draftIsEnabled {
             AppLockLockoutStore.clearState()
