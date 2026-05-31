@@ -146,7 +146,7 @@ struct RZZApp: App {
                 #if os(macOS)
                 menuBarHiddenModeActive = false
                 NSApplication.shared.setActivationPolicy(.regular)
-                configureMinimizeInterceptionIfNeeded()
+                configureWindowButtonInterceptionIfNeeded()
                 configureMainWindowRestorationIfNeeded()
                 #endif
                 if let warning = dataStoreBootstrap.warningMessage, !warning.isEmpty {
@@ -183,7 +183,7 @@ struct RZZApp: App {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
-                configureMinimizeInterceptionIfNeeded()
+                configureWindowButtonInterceptionIfNeeded()
                 configureMainWindowRestorationIfNeeded()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { notification in
@@ -207,7 +207,7 @@ struct RZZApp: App {
                 hideToMenuBar()
             }
             .onChange(of: minimizeToMenuBarEnabled) { _, _ in
-                configureMinimizeInterceptionIfNeeded()
+                configureWindowButtonInterceptionIfNeeded()
             }
             #endif
             .sheet(isPresented: $showThemeOnboarding) {
@@ -288,13 +288,23 @@ struct RZZApp: App {
         }
     }
 
-    private func configureMinimizeInterceptionIfNeeded() {
-        let interceptor = MinimizeButtonInterceptor.shared
+    private func configureWindowButtonInterceptionIfNeeded() {
+        let interceptor = WindowButtonInterceptor.shared
         for window in NSApplication.shared.windows {
+            if let closeButton = window.standardWindowButton(.closeButton) {
+                if minimizeToMenuBarEnabled {
+                    closeButton.target = interceptor
+                    closeButton.action = #selector(WindowButtonInterceptor.handleHideButton(_:))
+                } else {
+                    closeButton.target = nil
+                    closeButton.action = nil
+                }
+            }
+
             guard let miniaturizeButton = window.standardWindowButton(.miniaturizeButton) else { continue }
             if minimizeToMenuBarEnabled {
                 miniaturizeButton.target = interceptor
-                miniaturizeButton.action = #selector(MinimizeButtonInterceptor.handleMiniaturizeButton(_:))
+                miniaturizeButton.action = #selector(WindowButtonInterceptor.handleHideButton(_:))
             } else {
                 miniaturizeButton.target = nil
                 miniaturizeButton.action = nil
@@ -594,10 +604,10 @@ private extension Notification.Name {
     static let rzzRequestHideToMenuBar = Notification.Name("rzzRequestHideToMenuBar")
 }
 
-private final class MinimizeButtonInterceptor: NSObject {
-    static let shared = MinimizeButtonInterceptor()
+private final class WindowButtonInterceptor: NSObject {
+    static let shared = WindowButtonInterceptor()
 
-    @objc func handleMiniaturizeButton(_ sender: Any?) {
+    @objc func handleHideButton(_ sender: Any?) {
         NotificationCenter.default.post(name: .rzzRequestHideToMenuBar, object: sender)
     }
 }
