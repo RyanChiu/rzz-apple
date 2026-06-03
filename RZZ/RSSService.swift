@@ -219,10 +219,29 @@ enum RSSService {
         if let html = String(data: data, encoding: .unicode), !html.isEmpty {
             return html
         }
+        for encoding in legacyChineseTextEncodings {
+            if let html = String(data: data, encoding: encoding), !html.isEmpty {
+                return html
+            }
+        }
         if let html = String(data: data, encoding: .isoLatin1), !html.isEmpty {
             return html
         }
         throw RSSServiceError.invalidData
+    }
+
+    private static var legacyChineseTextEncodings: [String.Encoding] {
+        [
+            stringEncoding(for: CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)),
+            stringEncoding(for: CFStringEncoding(CFStringEncodings.GB_2312_80.rawValue)),
+            stringEncoding(for: CFStringEncoding(CFStringEncodings.big5.rawValue))
+        ].compactMap(\.self)
+    }
+
+    private static func stringEncoding(for cfEncoding: CFStringEncoding) -> String.Encoding? {
+        let rawValue = CFStringConvertEncodingToNSStringEncoding(cfEncoding)
+        guard rawValue != kCFStringEncodingInvalidId else { return nil }
+        return String.Encoding(rawValue: rawValue)
     }
 
     private static func describeNetworkError(_ error: Error) -> String {

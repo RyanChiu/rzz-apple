@@ -2609,7 +2609,8 @@ struct ContentView: View {
                 feed.title = fetchedTitle
             }
 
-            var existingKeys = Set(feed.articles.map(\.dedupeKey))
+            let existingArticlesByKey = indexedArticlesByDedupeKey(feed.articles)
+            var existingKeys = Set(existingArticlesByKey.keys)
             var newArticles: [Article] = []
             newArticles.reserveCapacity(parsedFeed.items.count)
 
@@ -2626,6 +2627,10 @@ struct ContentView: View {
                     dedupeKey = "title:\(item.title):\(item.publishedAt?.timeIntervalSince1970 ?? 0)"
                 }
 
+                if let existingArticle = existingArticlesByKey[dedupeKey] {
+                    backfillArticle(existingArticle, from: item, guid: guid, link: link)
+                    continue
+                }
                 if existingKeys.contains(dedupeKey) { continue }
                 existingKeys.insert(dedupeKey)
 
@@ -3064,7 +3069,8 @@ struct ContentView: View {
     }
 
     private func insertParsedItems(_ items: [ParsedItem], into feed: Feed) -> [Article] {
-        var existingKeys = Set(feed.articles.map(\.dedupeKey))
+        let existingArticlesByKey = indexedArticlesByDedupeKey(feed.articles)
+        var existingKeys = Set(existingArticlesByKey.keys)
         var newArticles: [Article] = []
         newArticles.reserveCapacity(items.count)
 
@@ -3081,6 +3087,10 @@ struct ContentView: View {
                 dedupeKey = "title:\(item.title):\(item.publishedAt?.timeIntervalSince1970 ?? 0)"
             }
 
+            if let existingArticle = existingArticlesByKey[dedupeKey] {
+                backfillArticle(existingArticle, from: item, guid: guid, link: link)
+                continue
+            }
             if existingKeys.contains(dedupeKey) { continue }
             existingKeys.insert(dedupeKey)
 
@@ -3099,6 +3109,34 @@ struct ContentView: View {
             modelContext.insert(article)
         }
         return newArticles
+    }
+
+    private func indexedArticlesByDedupeKey(_ articles: [Article]) -> [String: Article] {
+        var index: [String: Article] = [:]
+        for article in articles {
+            index[article.dedupeKey] = article
+        }
+        return index
+    }
+
+    private func backfillArticle(_ article: Article, from item: ParsedItem, guid: String, link: String) {
+        if article.guid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !guid.isEmpty {
+            article.guid = guid
+        }
+        if article.link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !link.isEmpty {
+            article.link = link
+        }
+        if article.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !item.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            article.summary = item.summary
+            if article.offlineStatus == .failed {
+                article.offlineStatus = .notCached
+                article.offlineLastError = ""
+            }
+        }
+        if article.publishedAt == nil, let publishedAt = item.publishedAt {
+            article.publishedAt = publishedAt
+        }
     }
 
     @MainActor
@@ -4866,6 +4904,11 @@ private struct ArticleDetailView: View {
             reloadBodyHTML()
             startMainThreadLagMonitorIfNeeded()
         }
+        .onChange(of: article.summary) { oldValue, newValue in
+            guard oldValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            guard !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            reloadBodyHTML()
+        }
         .onChange(of: isPerformanceDiagnosticsEnabled) { _, isEnabled in
             if isEnabled {
                 startMainThreadLagMonitorIfNeeded()
@@ -4903,7 +4946,8 @@ private struct ArticleDetailView: View {
         activeBodyLoadID = loadID
 
         let summary = article.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackHTML = summary.isEmpty ? "<p>No summary available.</p>" : article.summary
+        let hasFeedSummary = !summary.isEmpty
+        let fallbackHTML = hasFeedSummary ? article.summary : "<p>No summary available.</p>"
         let articleLink = article.link.trimmingCharacters(in: .whitespacesAndNewlines)
         let proxy = article.feed.flatMap(contentProxyResolver)
         let shouldUseProxyForContent = proxy != nil
@@ -4911,8 +4955,9 @@ private struct ArticleDetailView: View {
         let offlinePolicy = article.feed?.offlinePolicy ?? .off
         let cachedHTML = article.offlineCachedHTML
         let hasCachedHTML = article.hasOfflineContent
-        let hasFallbackHTML = !fallbackHTML.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let shouldPrimeWithFallback = offlinePolicy == .fullContent && !hasCachedHTML && hasFallbackHTML
+        let shouldPrimeWithFallback = hasFeedSummary &&
+            !hasCachedHTML &&
+            (offlinePolicy == .fullContent || articleLink.lowercased().hasPrefix("http://"))
 
         withAnimation(.easeInOut(duration: 0.12)) {
             contentPathUsesProxy = shouldUseProxyForContent
@@ -5332,8 +5377,13 @@ private struct ArticleHTMLView: View {
     }
 
     private func applyReaderOverrides(to html: String) -> String {
-        let extracted = extractPrimaryContent(from: html)
-        let sanitized = sanitizeContentMarkup(extracted)
+        let sanitized: String
+        if looksLikeHTMLMarkup(html) {
+            let extracted = extractPrimaryContent(from: html)
+            sanitized = sanitizeContentMarkup(extracted)
+        } else {
+            sanitized = "<pre class=\"rzz-plain-text\">\(escapeHTML(html))</pre>"
+        }
 
         return """
         <!doctype html>
@@ -5379,6 +5429,12 @@ private struct ArticleHTMLView: View {
           max-width: 100% !important;
           white-space: pre-wrap;
           word-break: break-word;
+        }
+        pre.rzz-plain-text {
+          margin: 0;
+          font: inherit;
+          line-height: inherit;
+          white-space: pre-wrap;
         }
         a { text-decoration: none; }
         </style>
@@ -5695,6 +5751,22 @@ private struct ArticleHTMLView: View {
             return body
         }
         return html
+    }
+
+    private func looksLikeHTMLMarkup(_ input: String) -> Bool {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains("<"), trimmed.contains(">") else { return false }
+        let pattern = "<\\s*/?\\s*(?:!doctype|html|head|body|article|main|section|div|p|br|blockquote|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|td|th|a|img|figure|picture|video|iframe|span|strong|em|b|i|code)\\b"
+        return trimmed.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private func escapeHTML(_ input: String) -> String {
+        input
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 
     private func firstCapturedGroup(in text: String, pattern: String) -> String? {
