@@ -123,6 +123,11 @@ How to publish a DMG release:
 4. Workflow generates SHA256 files for both DMGs (`*.dmg.sha256`).
 5. All files are attached to the GitHub Release asset for that tag.
 
+The DMG is a drag-to-install disk image, not an installer package. Users must open
+the DMG and drag `RZZ.app` onto the `Applications` shortcut in the DMG window; if
+they run `RZZ.app` directly from the mounted DMG, it will not be copied into
+`/Applications` or appear in Launchpad as an installed app.
+
 Example:
 
 ```bash

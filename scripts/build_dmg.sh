@@ -40,6 +40,23 @@ fi
 
 cp -R "$APP_PATH" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
+cat > "$STAGING_DIR/Install RZZ.txt" <<'EOF'
+Install RZZ
+
+1. Drag RZZ.app onto the Applications shortcut in this window.
+2. Open RZZ from Applications or Launchpad.
+3. After installation, you can eject this DMG.
+
+Do not run RZZ directly from the DMG if you want it to appear in Applications/Launchpad.
+
+安装 RZZ
+
+1. 将 RZZ.app 拖到本窗口中的 Applications 替身上。
+2. 从“应用程序”或 Launchpad 启动 RZZ。
+3. 安装完成后，可以推出这个 DMG。
+
+如果希望 RZZ 出现在“应用程序”或 Launchpad 中，不要直接从 DMG 里运行。
+EOF
 
 DMG_NAME="${APP_NAME}-${VERSION}-macOS.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
