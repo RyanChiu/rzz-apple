@@ -18,9 +18,10 @@ BUILD_ROOT="$ROOT_DIR/build/release"
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 STAGING_DIR="$BUILD_ROOT/staging"
 DIST_DIR="$ROOT_DIR/dist"
+MOUNT_DIR="$BUILD_ROOT/mount"
 
 rm -rf "$BUILD_ROOT" "$DIST_DIR"
-mkdir -p "$BUILD_ROOT" "$STAGING_DIR" "$DIST_DIR"
+mkdir -p "$BUILD_ROOT" "$STAGING_DIR" "$DIST_DIR" "$MOUNT_DIR"
 
 echo "Building $APP_NAME $VERSION for macOS $MIN_MACOS_VERSION+ ($RELEASE_ARCHS) ..."
 xcodebuild \
@@ -59,34 +60,65 @@ lipo -info "$APP_EXECUTABLE"
 
 cp -R "$APP_PATH" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
-cat > "$STAGING_DIR/Install RZZ.txt" <<'EOF'
-Install RZZ
-
-1. Drag RZZ.app onto the Applications shortcut in this window.
-2. Open RZZ from Applications or Launchpad.
-3. After installation, you can eject this DMG.
-
-Do not run RZZ directly from the DMG if you want it to appear in Applications/Launchpad.
-
-安装 RZZ
-
-1. 将 RZZ.app 拖到本窗口中的 Applications 替身上。
-2. 从“应用程序”或 Launchpad 启动 RZZ。
-3. 安装完成后，可以推出这个 DMG。
-
-如果希望 RZZ 出现在“应用程序”或 Launchpad 中，不要直接从 DMG 里运行。
-EOF
 
 DMG_NAME="${APP_NAME}-${VERSION}-macOS.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
+TEMP_DMG_PATH="$BUILD_ROOT/$APP_NAME-rw.dmg"
+VOLUME_NAME="$APP_NAME $VERSION"
 
 echo "Creating DMG: $DMG_PATH"
 hdiutil create \
-  -volname "$APP_NAME $VERSION" \
+  -volname "$VOLUME_NAME" \
   -srcfolder "$STAGING_DIR" \
   -ov \
+  -format UDRW \
+  "$TEMP_DMG_PATH"
+
+echo "Applying DMG Finder layout ..."
+hdiutil attach "$TEMP_DMG_PATH" \
+  -mountpoint "$MOUNT_DIR" \
+  -nobrowse \
+  -noverify \
+  -noautoopen
+
+if osascript <<EOF
+tell application "Finder"
+  tell disk "$VOLUME_NAME"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 120, 720, 430}
+    set arrangement of icon view options of container window to not arranged
+    set icon size of icon view options of container window to 96
+    set position of item "$APP_NAME.app" of container window to {150, 150}
+    set position of item "Applications" of container window to {410, 150}
+    close
+    open
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+EOF
+then
+  echo "Finder layout applied."
+else
+  echo "Error: could not apply Finder layout."
+  hdiutil detach -force "$MOUNT_DIR" || true
+  exit 1
+fi
+
+sync
+if ! hdiutil detach "$MOUNT_DIR"; then
+  hdiutil detach -force "$MOUNT_DIR"
+fi
+
+hdiutil convert "$TEMP_DMG_PATH" \
+  -ov \
   -format UDZO \
-  "$DMG_PATH"
+  -imagekey zlib-level=9 \
+  -o "$DMG_PATH"
 
 echo "Done."
 ls -lh "$DMG_PATH"
