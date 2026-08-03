@@ -64,7 +64,7 @@ ln -s /Applications "$STAGING_DIR/Applications"
 DMG_NAME="${APP_NAME}-${VERSION}-macOS.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
 TEMP_DMG_PATH="$BUILD_ROOT/$APP_NAME-rw.dmg"
-VOLUME_NAME="$APP_NAME $VERSION"
+VOLUME_NAME="$APP_NAME Installer $VERSION"
 
 echo "Creating DMG: $DMG_PATH"
 hdiutil create \
