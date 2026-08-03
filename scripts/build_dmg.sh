@@ -18,10 +18,9 @@ BUILD_ROOT="$ROOT_DIR/build/release"
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 STAGING_DIR="$BUILD_ROOT/staging"
 DIST_DIR="$ROOT_DIR/dist"
-MOUNT_DIR="$BUILD_ROOT/mount"
 
 rm -rf "$BUILD_ROOT" "$DIST_DIR"
-mkdir -p "$BUILD_ROOT" "$STAGING_DIR" "$DIST_DIR" "$MOUNT_DIR"
+mkdir -p "$BUILD_ROOT" "$STAGING_DIR" "$DIST_DIR"
 
 echo "Building $APP_NAME $VERSION for macOS $MIN_MACOS_VERSION+ ($RELEASE_ARCHS) ..."
 xcodebuild \
@@ -75,14 +74,20 @@ hdiutil create \
   "$TEMP_DMG_PATH"
 
 echo "Applying DMG Finder layout ..."
-hdiutil attach "$TEMP_DMG_PATH" \
-  -mountpoint "$MOUNT_DIR" \
+ATTACH_OUTPUT="$(hdiutil attach "$TEMP_DMG_PATH" \
   -nobrowse \
   -noverify \
-  -noautoopen
+  -noautoopen)"
+printf "%s\n" "$ATTACH_OUTPUT"
+MOUNT_DIR="$(printf "%s\n" "$ATTACH_OUTPUT" | sed -n 's#^.*\(/Volumes/.*\)$#\1#p' | tail -n 1)"
+if [[ -z "$MOUNT_DIR" ]]; then
+  echo "Error: could not determine DMG mount path."
+  exit 1
+fi
 
 if osascript <<EOF
 tell application "Finder"
+  delay 1
   tell disk "$VOLUME_NAME"
     open
     set current view of container window to icon view
