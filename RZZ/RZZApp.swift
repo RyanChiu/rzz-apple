@@ -216,21 +216,15 @@ struct RZZApp: App {
                     showThemeOnboarding = false
                 }
                 .interactiveDismissDisabled(true)
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showAboutSheet) {
                 AboutRZZView()
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showHelpSheet) {
                 HelpRZZView()
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .preferredColorScheme(appThemeMode?.colorScheme)
             .modelContainer(container)

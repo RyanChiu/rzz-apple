@@ -118,7 +118,7 @@ This repo includes a GitHub Actions workflow:
 How to publish a DMG release:
 
 1. Push a tag like `v1.0.1`.
-2. GitHub Actions builds an unsigned macOS Release app and packages `dist/RZZ-<version>-macOS.dmg`.
+2. GitHub Actions builds an unsigned Universal 2 macOS Release app (`arm64` + `x86_64`, macOS 14.0+) and packages `dist/RZZ-<version>-macOS.dmg`.
 3. Workflow also creates a latest alias: `dist/RZZ-latest-macOS.dmg`.
 4. Workflow generates SHA256 files for both DMGs (`*.dmg.sha256`).
 5. All files are attached to the GitHub Release asset for that tag.
@@ -127,6 +127,11 @@ The DMG is a drag-to-install disk image, not an installer package. Users must op
 the DMG and drag `RZZ.app` onto the `Applications` shortcut in the DMG window; if
 they run `RZZ.app` directly from the mounted DMG, it will not be copied into
 `/Applications` or appear in Launchpad as an installed app.
+
+`scripts/build_dmg.sh` defaults to `RZZ_MIN_MACOS_VERSION=14.0` because RZZ uses
+SwiftData, and it defaults to `RZZ_ARCHS="arm64 x86_64"` for Apple Silicon and
+Intel Mac compatibility. Override these environment variables only when making a
+deliberately narrower or newer release build.
 
 Example:
 

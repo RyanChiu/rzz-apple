@@ -6,6 +6,8 @@ cd "$ROOT_DIR"
 
 APP_NAME="RZZ"
 VERSION="${1:-}"
+MIN_MACOS_VERSION="${RZZ_MIN_MACOS_VERSION:-14.0}"
+RELEASE_ARCHS="${RZZ_ARCHS:-arm64 x86_64}"
 
 if [[ -z "$VERSION" ]]; then
   VERSION="$(grep -m1 "MARKETING_VERSION = " RZZ.xcodeproj/project.pbxproj | sed -E 's/.*MARKETING_VERSION = ([^;]+);/\1/' | tr -d ' ')"
@@ -20,13 +22,16 @@ DIST_DIR="$ROOT_DIR/dist"
 rm -rf "$BUILD_ROOT" "$DIST_DIR"
 mkdir -p "$BUILD_ROOT" "$STAGING_DIR" "$DIST_DIR"
 
-echo "Building $APP_NAME $VERSION ..."
+echo "Building $APP_NAME $VERSION for macOS $MIN_MACOS_VERSION+ ($RELEASE_ARCHS) ..."
 xcodebuild \
   -project RZZ.xcodeproj \
   -scheme RZZ \
   -configuration Release \
-  -destination 'platform=macOS' \
+  -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED_DATA" \
+  MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS_VERSION" \
+  ARCHS="$RELEASE_ARCHS" \
+  ONLY_ACTIVE_ARCH=NO \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
@@ -37,6 +42,20 @@ if [[ -z "$APP_PATH" ]]; then
   echo "Error: could not find built app."
   exit 1
 fi
+
+APP_EXECUTABLE="$APP_PATH/Contents/MacOS/$APP_NAME"
+if [[ ! -x "$APP_EXECUTABLE" ]]; then
+  echo "Error: could not find app executable at $APP_EXECUTABLE."
+  exit 1
+fi
+
+read -r -a REQUESTED_ARCHS <<< "$RELEASE_ARCHS"
+if ! lipo -verify_arch "${REQUESTED_ARCHS[@]}" "$APP_EXECUTABLE"; then
+  echo "Error: built executable does not contain expected architectures: $RELEASE_ARCHS"
+  lipo -info "$APP_EXECUTABLE" || true
+  exit 1
+fi
+lipo -info "$APP_EXECUTABLE"
 
 cp -R "$APP_PATH" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"

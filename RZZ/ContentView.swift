@@ -10,6 +10,21 @@ import AppKit
 import UIKit
 #endif
 
+extension View {
+    @ViewBuilder
+    func rzzPresentationFitted() -> some View {
+        #if os(macOS)
+        if #available(macOS 15.0, *) {
+            self.presentationSizing(.fitted)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
+    }
+}
+
 private enum ArticleFilter: String, CaseIterable, Identifiable {
     case all
     case starred
@@ -850,9 +865,7 @@ struct ContentView: View {
                     onRename: renameTag(_:to:),
                     onDelete: deleteTag(_:)
                 )
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showProxyProfiles) {
                 ProxyProfilesManagerView(
@@ -863,17 +876,13 @@ struct ContentView: View {
                     onUpdate: updateProxyProfile(profileID:values:),
                     onDelete: deleteProxyProfile(profileID:)
                 )
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showCreateFolderSheet) {
                 FolderFormView { folderName in
                     addCustomFolder(named: folderName)
                 }
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(item: $folderRenameDraft) { draft in
                 FolderFormView(
@@ -883,9 +892,7 @@ struct ContentView: View {
                 ) { newName in
                     renameFolder(from: draft.originalName, to: newName)
                 }
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showAddFeed) {
                 FeedFormView(
@@ -915,9 +922,7 @@ struct ContentView: View {
                         await addFeed(values: values)
                     }
                 }
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(item: $editDraft) { draft in
                 FeedFormView(
@@ -947,9 +952,7 @@ struct ContentView: View {
                         await updateFeed(feedID: draft.feedID, values: values)
                     }
                 }
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showSecuritySettings) {
                 AppLockSettingsView(
@@ -958,9 +961,7 @@ struct ContentView: View {
                     appThemeModeRaw: $appThemeModeRaw,
                     autoRefreshOnLaunch: $autoRefreshOnLaunch
                 )
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showOfflineStorage) {
                 OfflineStorageView(
@@ -970,9 +971,7 @@ struct ContentView: View {
                     onClearAll: clearAllOfflineCache,
                     onClearFeed: clearOfflineCache(forUsage:)
                 )
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             #if DEBUG
             .sheet(isPresented: $showPerformanceDiagnostics) {
@@ -981,9 +980,7 @@ struct ContentView: View {
                     samples: performanceSamples,
                     onClear: clearPerformanceSamples
                 )
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             #endif
             .sheet(isPresented: $showRefreshDetails) {
@@ -995,9 +992,7 @@ struct ContentView: View {
                         Task { await retryFailedFeedsFromLastRefresh() }
                     }
                 )
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .sheet(isPresented: $showAddFeedDetails) {
                 RefreshDetailsView(
@@ -1006,9 +1001,7 @@ struct ContentView: View {
                     details: lastAddFeedDetails,
                     onRetryFailedOnly: nil
                 )
-                #if os(macOS)
-                .presentationSizing(.fitted)
-                #endif
+                .rzzPresentationFitted()
             }
             .confirmationDialog(
                 "Import Backup and Replace Current Data?",
@@ -6692,7 +6685,7 @@ private struct ProxyProfilesManagerView: View {
                     errorMessage = error
                 }
             }
-            .presentationSizing(.fitted)
+            .rzzPresentationFitted()
         }
         .sheet(item: $editDraft) { draft in
             ProxyProfileFormView(
@@ -6710,7 +6703,7 @@ private struct ProxyProfilesManagerView: View {
                     errorMessage = error
                 }
             }
-            .presentationSizing(.fitted)
+            .rzzPresentationFitted()
         }
         #else
         NavigationStack {
@@ -7613,9 +7606,7 @@ private struct TagManagerView: View {
                 guard let tag = tags.first(where: { $0.persistentModelID == draft.tagID }) else { return }
                 onRename(tag, newName)
             }
-            #if os(macOS)
-            .presentationSizing(.fitted)
-            #endif
+            .rzzPresentationFitted()
         }
         #else
         NavigationStack {
