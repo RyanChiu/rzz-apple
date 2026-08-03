@@ -85,26 +85,33 @@ if [[ -z "$MOUNT_DIR" ]]; then
   exit 1
 fi
 
-if osascript <<EOF
-tell application "Finder"
-  delay 1
-  tell disk "$VOLUME_NAME"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {200, 120, 720, 430}
-    set arrangement of icon view options of container window to not arranged
-    set icon size of icon view options of container window to 96
-    set position of item "$APP_NAME.app" of container window to {150, 150}
-    set position of item "Applications" of container window to {410, 150}
-    close
-    open
-    update without registering applications
+rm -f "$MOUNT_DIR/.DS_Store"
+
+if osascript - "$MOUNT_DIR" "$APP_NAME" <<'EOF'
+on run argv
+  set mountPath to item 1 of argv
+  set appName to item 2 of argv
+
+  tell application "Finder"
+    set dmgFolder to (POSIX file mountPath) as alias
     delay 1
-    close
+    open dmgFolder
+    set dmgWindow to container window of dmgFolder
+    set current view of dmgWindow to icon view
+    set toolbar visible of dmgWindow to false
+    set statusbar visible of dmgWindow to false
+    set the bounds of dmgWindow to {200, 120, 720, 430}
+    set arrangement of icon view options of dmgWindow to not arranged
+    set icon size of icon view options of dmgWindow to 96
+    set position of item (appName & ".app") of dmgFolder to {150, 150}
+    set position of item "Applications" of dmgFolder to {410, 150}
+    close dmgWindow
+    open dmgFolder
+    update dmgFolder without registering applications
+    delay 1
+    close container window of dmgFolder
   end tell
-end tell
+end run
 EOF
 then
   echo "Finder layout applied."
