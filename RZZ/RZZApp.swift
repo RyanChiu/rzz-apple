@@ -117,6 +117,7 @@ struct RZZApp: App {
             }
         } label: {
             Image("MenuBarIcon")
+                .renderingMode(.template)
         }
         .menuBarExtraStyle(.menu)
         #endif
