@@ -51,7 +51,7 @@ if [[ ! -x "$APP_EXECUTABLE" ]]; then
 fi
 
 read -r -a REQUESTED_ARCHS <<< "$RELEASE_ARCHS"
-if ! lipo -verify_arch "${REQUESTED_ARCHS[@]}" "$APP_EXECUTABLE"; then
+if ! lipo "$APP_EXECUTABLE" -verify_arch "${REQUESTED_ARCHS[@]}"; then
   echo "Error: built executable does not contain expected architectures: $RELEASE_ARCHS"
   lipo -info "$APP_EXECUTABLE" || true
   exit 1
