@@ -22,6 +22,38 @@ DIST_DIR="$ROOT_DIR/dist"
 rm -rf "$BUILD_ROOT" "$DIST_DIR"
 mkdir -p "$BUILD_ROOT" "$STAGING_DIR" "$DIST_DIR"
 
+find_signing_identity() {
+  local pattern="$1"
+  security find-identity -v -p codesigning 2>/dev/null | awk -F '"' -v pattern="$pattern" '$0 ~ pattern { print $2; exit }'
+}
+
+SIGN_IDENTITY="${RZZ_CODE_SIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+  SIGN_IDENTITY="$(find_signing_identity "Developer ID Application")"
+fi
+if [[ -z "$SIGN_IDENTITY" ]]; then
+  SIGN_IDENTITY="$(find_signing_identity "Apple Development")"
+fi
+
+BUILD_SIGNING_ARGS=()
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  echo "Signing app with: $SIGN_IDENTITY"
+  BUILD_SIGNING_ARGS=(
+    CODE_SIGNING_ALLOWED=YES
+    CODE_SIGNING_REQUIRED=YES
+    CODE_SIGN_STYLE=Manual
+    CODE_SIGN_IDENTITY="$SIGN_IDENTITY"
+  )
+else
+  echo "Warning: no codesigning identity found; building unsigned DMG."
+  echo "Unsigned builds may trigger Keychain prompts and should not be used as public release artifacts."
+  BUILD_SIGNING_ARGS=(
+    CODE_SIGNING_ALLOWED=NO
+    CODE_SIGNING_REQUIRED=NO
+    CODE_SIGN_IDENTITY=
+  )
+fi
+
 echo "Building $APP_NAME $VERSION for macOS $MIN_MACOS_VERSION+ ($RELEASE_ARCHS) ..."
 xcodebuild \
   -project RZZ.xcodeproj \
@@ -32,9 +64,7 @@ xcodebuild \
   MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS_VERSION" \
   ARCHS="$RELEASE_ARCHS" \
   ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGN_IDENTITY="" \
+  "${BUILD_SIGNING_ARGS[@]}" \
   build
 
 APP_PATH="$(find "$DERIVED_DATA/Build/Products/Release" -maxdepth 1 -name "$APP_NAME.app" -print -quit)"
@@ -86,30 +116,31 @@ if [[ -z "$MOUNT_DIR" ]]; then
 fi
 
 rm -f "$MOUNT_DIR/.DS_Store"
+MOUNT_NAME="$(basename "$MOUNT_DIR")"
 
-if osascript - "$MOUNT_DIR" "$APP_NAME" <<'EOF'
+if osascript - "$MOUNT_NAME" "$APP_NAME" <<'EOF'
 on run argv
-  set mountPath to item 1 of argv
+  set volumeName to item 1 of argv
   set appName to item 2 of argv
 
   tell application "Finder"
-    set dmgFolder to (POSIX file mountPath) as alias
     delay 1
-    open dmgFolder
-    set dmgWindow to container window of dmgFolder
-    set current view of dmgWindow to icon view
-    set toolbar visible of dmgWindow to false
-    set statusbar visible of dmgWindow to false
-    set the bounds of dmgWindow to {200, 120, 720, 430}
-    set arrangement of icon view options of dmgWindow to not arranged
-    set icon size of icon view options of dmgWindow to 96
-    set position of item (appName & ".app") of dmgFolder to {150, 150}
-    set position of item "Applications" of dmgFolder to {410, 150}
-    close dmgWindow
-    open dmgFolder
-    update dmgFolder without registering applications
-    delay 1
-    close container window of dmgFolder
+    tell disk volumeName
+      open
+      set current view of container window to icon view
+      set toolbar visible of container window to false
+      set statusbar visible of container window to false
+      set the bounds of container window to {200, 120, 720, 430}
+      set arrangement of icon view options of container window to not arranged
+      set icon size of icon view options of container window to 96
+      set position of item (appName & ".app") of container window to {150, 150}
+      set position of item "Applications" of container window to {410, 150}
+      close
+      open
+      update without registering applications
+      delay 1
+      close
+    end tell
   end tell
 end run
 EOF

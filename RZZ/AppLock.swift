@@ -38,14 +38,19 @@ enum AppLockPINMigrationResult {
     case notNeeded
     case migrated
     case clearedWithoutMigration
+    case deferredDueToKeychainAccess
 }
 
 enum AppLockCredentialStore {
     private static let account = "app-lock.pin-hash"
 
     static func readPINHash() -> String {
-        SecureSecretStore.readPassword(forAccount: account)?
+        readPINHashResult().password?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    static func readPINHashResult() -> SecureSecretReadResult {
+        SecureSecretStore.readPasswordResult(forAccount: account)
     }
 
     @discardableResult
@@ -60,16 +65,23 @@ enum AppLockCredentialStore {
 
     static func migrateLegacyPINHashIfNeeded(legacyPINHash: inout String) -> AppLockPINMigrationResult {
         let legacy = legacyPINHash.trimmingCharacters(in: .whitespacesAndNewlines)
-        defer { legacyPINHash = "" }
         guard !legacy.isEmpty else { return .notNeeded }
 
-        if !readPINHash().isEmpty {
+        switch readPINHashResult() {
+        case .found(let existingHash) where !existingHash.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            legacyPINHash = ""
             return .notNeeded
+        case .found, .notFound:
+            break
+        case .accessDenied, .failure:
+            return .deferredDueToKeychainAccess
         }
 
         guard savePINHash(legacy) else {
+            legacyPINHash = ""
             return .clearedWithoutMigration
         }
+        legacyPINHash = ""
         return .migrated
     }
 }

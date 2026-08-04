@@ -30,6 +30,7 @@ struct RZZApp: App {
     @State private var shouldLockOnNextActive = false
     @State private var isPrivacyShieldVisible = false
     @State private var hasShownDataStoreWarning = false
+    @State private var alertTitle = "Storage Warning"
     @State private var transferMessage: String?
     @State private var showThemeOnboarding = false
     @State private var showAboutSheet = false
@@ -63,19 +64,11 @@ struct RZZApp: App {
         }
         #endif
         .onChange(of: scenePhase) { _, newPhase in
-            guard dataStoreBootstrap.container != nil else { return }
             switch newPhase {
             case .inactive, .background:
-                isPrivacyShieldVisible = true
-                if appLockEnabled, !appLockPINHash.isEmpty {
-                    shouldLockOnNextActive = true
-                }
+                handleAppInactiveForLock()
             case .active:
-                if appLockEnabled, !appLockPINHash.isEmpty, shouldLockOnNextActive {
-                    isAppLocked = true
-                }
-                shouldLockOnNextActive = false
-                isPrivacyShieldVisible = false
+                handleAppActiveForLock()
             @unknown default:
                 break
             }
@@ -151,6 +144,7 @@ struct RZZApp: App {
                 configureMainWindowRestorationIfNeeded()
                 #endif
                 if let warning = dataStoreBootstrap.warningMessage, !warning.isEmpty {
+                    alertTitle = "Storage Warning"
                     transferMessage = warning
                 }
                 if appThemeMode == nil {
@@ -165,7 +159,7 @@ struct RZZApp: App {
                     showThemeOnboarding = false
                 }
             }
-            .alert("Storage Warning", isPresented: Binding(get: {
+            .alert(alertTitle, isPresented: Binding(get: {
                 transferMessage != nil
             }, set: { presented in
                 if !presented {
@@ -182,6 +176,12 @@ struct RZZApp: App {
                 DispatchQueue.main.async {
                     hideToMenuBar()
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+                handleAppInactiveForLock()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                handleAppActiveForLock()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
                 configureWindowButtonInterceptionIfNeeded()
@@ -240,6 +240,30 @@ struct RZZApp: App {
         return AppThemeMode(rawValue: trimmed)
     }
 
+    private func handleAppInactiveForLock() {
+        guard dataStoreBootstrap.container != nil else { return }
+        isPrivacyShieldVisible = true
+        guard appLockEnabled else { return }
+        if appLockPINHash.isEmpty {
+            bootstrapAppLockPINHash()
+        }
+        if !appLockPINHash.isEmpty {
+            shouldLockOnNextActive = true
+        }
+    }
+
+    private func handleAppActiveForLock() {
+        guard dataStoreBootstrap.container != nil else { return }
+        if appLockEnabled, appLockPINHash.isEmpty {
+            bootstrapAppLockPINHash()
+        }
+        if appLockEnabled, !appLockPINHash.isEmpty, shouldLockOnNextActive {
+            isAppLocked = true
+        }
+        shouldLockOnNextActive = false
+        isPrivacyShieldVisible = false
+    }
+
     private func bootstrapAppLockPINHash() {
         let migration = AppLockCredentialStore.migrateLegacyPINHashIfNeeded(legacyPINHash: &legacyAppLockPINHash)
         switch migration {
@@ -248,14 +272,36 @@ struct RZZApp: App {
             appLockPINHash = ""
             isAppLocked = false
             shouldLockOnNextActive = false
+        case .deferredDueToKeychainAccess:
+            handleAppLockKeychainUnavailable()
         case .notNeeded, .migrated:
-            appLockPINHash = AppLockCredentialStore.readPINHash()
-            if appLockPINHash.isEmpty {
+            switch AppLockCredentialStore.readPINHashResult() {
+            case .found(let pinHash):
+                appLockPINHash = pinHash.trimmingCharacters(in: .whitespacesAndNewlines)
+                if appLockPINHash.isEmpty {
+                    appLockEnabled = false
+                    isAppLocked = false
+                    shouldLockOnNextActive = false
+                }
+            case .notFound:
                 appLockEnabled = false
                 isAppLocked = false
                 shouldLockOnNextActive = false
+            case .accessDenied, .failure:
+                handleAppLockKeychainUnavailable()
             }
         }
+    }
+
+    private func handleAppLockKeychainUnavailable() {
+        appLockPINHash = ""
+        isAppLocked = false
+        shouldLockOnNextActive = false
+        guard appLockEnabled else { return }
+        alertTitle = "App Lock Warning"
+        transferMessage = """
+        RZZ could not access the app lock PIN stored in macOS Keychain. Keep App Lock enabled and choose Always Allow in the Keychain prompt, then relaunch RZZ.
+        """
     }
 
     #if os(macOS)
