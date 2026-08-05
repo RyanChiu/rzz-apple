@@ -29,6 +29,7 @@ struct RZZApp: App {
     @State private var isAppLocked = false
     @State private var shouldLockOnNextActive = false
     @State private var isPrivacyShieldVisible = false
+    @State private var hasAttemptedAppLockPINBootstrap = false
     @State private var hasShownDataStoreWarning = false
     @State private var alertTitle = "Storage Warning"
     @State private var transferMessage: String?
@@ -74,6 +75,7 @@ struct RZZApp: App {
             }
         }
         .onChange(of: appLockEnabled) { _, isEnabled in
+            hasAttemptedAppLockPINBootstrap = false
             if !isEnabled {
                 isAppLocked = false
                 shouldLockOnNextActive = false
@@ -126,7 +128,7 @@ struct RZZApp: App {
                 )
                 .privacySensitive()
                 .task {
-                    bootstrapAppLockPINHash()
+                    loadAppLockPINHashIfNeeded()
                 }
 
                 if isPrivacyShieldVisible {
@@ -244,29 +246,62 @@ struct RZZApp: App {
         guard dataStoreBootstrap.container != nil else { return }
         isPrivacyShieldVisible = true
         guard appLockEnabled else { return }
-        if appLockPINHash.isEmpty {
-            bootstrapAppLockPINHash()
-        }
-        if !appLockPINHash.isEmpty {
-            shouldLockOnNextActive = true
-        }
+        shouldLockOnNextActive = true
     }
 
     private func handleAppActiveForLock() {
         guard dataStoreBootstrap.container != nil else { return }
-        if appLockEnabled, appLockPINHash.isEmpty {
-            bootstrapAppLockPINHash()
+        guard appLockEnabled else {
+            shouldLockOnNextActive = false
+            isPrivacyShieldVisible = false
+            return
         }
-        if appLockEnabled, !appLockPINHash.isEmpty, shouldLockOnNextActive {
+
+        if appLockPINHash.isEmpty {
+            loadAppLockPINHashIfNeeded()
+        }
+
+        guard appLockEnabled else {
+            shouldLockOnNextActive = false
+            isPrivacyShieldVisible = false
+            return
+        }
+
+        if !appLockPINHash.isEmpty, shouldLockOnNextActive {
             isAppLocked = true
+            shouldLockOnNextActive = false
+            isPrivacyShieldVisible = false
+        } else if shouldLockOnNextActive {
+            isPrivacyShieldVisible = true
+        } else {
+            isPrivacyShieldVisible = false
         }
-        shouldLockOnNextActive = false
-        isPrivacyShieldVisible = false
+    }
+
+    @discardableResult
+    private func loadAppLockPINHashIfNeeded() -> Bool {
+        if !appLockPINHash.isEmpty {
+            return true
+        }
+        guard !hasAttemptedAppLockPINBootstrap else {
+            return false
+        }
+
+        hasAttemptedAppLockPINBootstrap = true
+        bootstrapAppLockPINHash()
+        return !appLockPINHash.isEmpty
     }
 
     private func bootstrapAppLockPINHash() {
-        let migration = AppLockCredentialStore.migrateLegacyPINHashIfNeeded(legacyPINHash: &legacyAppLockPINHash)
-        switch migration {
+        let pinLoad = AppLockCredentialStore.loadPINHashMigratingLegacyIfNeeded(legacyPINHash: &legacyAppLockPINHash)
+        switch pinLoad {
+        case .found(let pinHash):
+            appLockPINHash = pinHash
+        case .notFound:
+            appLockEnabled = false
+            appLockPINHash = ""
+            isAppLocked = false
+            shouldLockOnNextActive = false
         case .clearedWithoutMigration:
             appLockEnabled = false
             appLockPINHash = ""
@@ -274,22 +309,6 @@ struct RZZApp: App {
             shouldLockOnNextActive = false
         case .deferredDueToKeychainAccess:
             handleAppLockKeychainUnavailable()
-        case .notNeeded, .migrated:
-            switch AppLockCredentialStore.readPINHashResult() {
-            case .found(let pinHash):
-                appLockPINHash = pinHash.trimmingCharacters(in: .whitespacesAndNewlines)
-                if appLockPINHash.isEmpty {
-                    appLockEnabled = false
-                    isAppLocked = false
-                    shouldLockOnNextActive = false
-                }
-            case .notFound:
-                appLockEnabled = false
-                isAppLocked = false
-                shouldLockOnNextActive = false
-            case .accessDenied, .failure:
-                handleAppLockKeychainUnavailable()
-            }
         }
     }
 

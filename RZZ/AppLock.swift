@@ -41,6 +41,13 @@ enum AppLockPINMigrationResult {
     case deferredDueToKeychainAccess
 }
 
+enum AppLockPINLoadResult {
+    case found(String)
+    case notFound
+    case clearedWithoutMigration
+    case deferredDueToKeychainAccess
+}
+
 enum AppLockCredentialStore {
     private static let account = "app-lock.pin-hash"
 
@@ -83,6 +90,36 @@ enum AppLockCredentialStore {
         }
         legacyPINHash = ""
         return .migrated
+    }
+
+    static func loadPINHashMigratingLegacyIfNeeded(legacyPINHash: inout String) -> AppLockPINLoadResult {
+        let legacy = legacyPINHash.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch readPINHashResult() {
+        case .found(let existingHash):
+            let trimmedHash = existingHash.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedHash.isEmpty {
+                legacyPINHash = ""
+                return .found(trimmedHash)
+            }
+        case .notFound:
+            break
+        case .accessDenied, .failure:
+            return .deferredDueToKeychainAccess
+        }
+
+        guard !legacy.isEmpty else {
+            legacyPINHash = ""
+            return .notFound
+        }
+
+        guard savePINHash(legacy) else {
+            legacyPINHash = ""
+            return .clearedWithoutMigration
+        }
+
+        legacyPINHash = ""
+        return .found(legacy)
     }
 }
 
