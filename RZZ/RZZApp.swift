@@ -111,7 +111,7 @@ struct RZZApp: App {
                 Label("Quit RZZ", systemImage: "power")
             }
         } label: {
-            Image("MenuBarIcon")
+            Image(menuBarIconAssetName)
                 .renderingMode(.template)
         }
         .menuBarExtraStyle(.menu)
@@ -240,6 +240,14 @@ struct RZZApp: App {
         let trimmed = appThemeModeRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return AppThemeMode(rawValue: trimmed)
+    }
+
+    private var menuBarIconAssetName: String {
+        #if DEBUG
+        "MenuBarIconDebug"
+        #else
+        "MenuBarIcon"
+        #endif
     }
 
     private func handleAppInactiveForLock() {
