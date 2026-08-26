@@ -652,6 +652,7 @@ struct ContentView: View {
                     } label: {
                         Label("Add Feed", systemImage: "plus")
                     }
+                    .help("Add a feed")
                     .disabled(shouldShowLockScreen)
 
                     Button {
@@ -660,6 +661,7 @@ struct ContentView: View {
                     } label: {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
+                    .help("Refresh selected feeds")
                     .disabled(shouldShowLockScreen || isRefreshing || feeds.isEmpty)
 
                     Button {
@@ -684,6 +686,7 @@ struct ContentView: View {
                         } label: {
                             Label("Edit Feed", systemImage: "pencil")
                         }
+                        .help("Edit selected feed")
                         .disabled(shouldShowLockScreen)
                     }
 
@@ -693,6 +696,7 @@ struct ContentView: View {
                     } label: {
                         Label("Offline Storage", systemImage: "internaldrive")
                     }
+                    .help("Manage offline storage")
                     .disabled(shouldShowLockScreen)
 
                     Button {
@@ -701,6 +705,7 @@ struct ContentView: View {
                     } label: {
                         Label("Proxy Profiles", systemImage: "network.badge.shield.half.filled")
                     }
+                    .help("Manage proxy profiles")
                     .disabled(shouldShowLockScreen)
 
                     Button {
@@ -731,6 +736,7 @@ struct ContentView: View {
                     } label: {
                         Label("Diagnostics", systemImage: "waveform.path.ecg.rectangle")
                     }
+                    .help("Open diagnostics menu")
                     .disabled(shouldShowLockScreen)
                     #endif
 
@@ -787,6 +793,7 @@ struct ContentView: View {
                     } label: {
                         Label("Backup", systemImage: "archivebox")
                     }
+                    .help("Open backup menu")
                     .disabled(shouldShowLockScreen)
                 }
             }

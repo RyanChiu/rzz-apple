@@ -144,6 +144,7 @@ struct RZZApp: App {
                 NSApplication.shared.setActivationPolicy(.regular)
                 configureWindowButtonInterceptionIfNeeded()
                 configureMainWindowRestorationIfNeeded()
+                MainToolbarTooltips.apply()
                 #endif
                 if let warning = dataStoreBootstrap.warningMessage, !warning.isEmpty {
                     alertTitle = "Storage Warning"
@@ -184,10 +185,12 @@ struct RZZApp: App {
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 handleAppActiveForLock()
+                MainToolbarTooltips.apply()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
                 configureWindowButtonInterceptionIfNeeded()
                 configureMainWindowRestorationIfNeeded()
+                MainToolbarTooltips.apply()
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResizeNotification)) { notification in
                 persistMainWindowState(from: notification.object as? NSWindow)
@@ -677,6 +680,60 @@ private final class WindowButtonInterceptor: NSObject {
 
     @objc func handleHideButton(_ sender: Any?) {
         NotificationCenter.default.post(name: .rzzRequestHideToMenuBar, object: sender)
+    }
+}
+
+private enum MainToolbarTooltips {
+    private static let tooltipsByLabel = [
+        "Add Feed": "Add a feed",
+        "Refresh": "Refresh selected feeds",
+        "Hide Articles List": "Hide middle article list column",
+        "Show Articles List": "Show middle article list column",
+        "Edit Feed": "Edit selected feed",
+        "Offline Storage": "Manage offline storage",
+        "Proxy Profiles": "Manage proxy profiles",
+        "Settings": "Open app settings",
+        "Diagnostics": "Open diagnostics menu",
+        "Backup": "Open backup menu"
+    ]
+
+    static func apply() {
+        DispatchQueue.main.async {
+            applyNow()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                applyNow()
+            }
+        }
+    }
+
+    private static func applyNow() {
+        for window in NSApplication.shared.windows {
+            guard let toolbar = window.toolbar else { continue }
+            for item in toolbar.items {
+                guard let tooltip = tooltip(for: item) else { continue }
+                item.toolTip = tooltip
+                applyTooltip(tooltip, to: item.view)
+            }
+        }
+    }
+
+    private static func tooltip(for item: NSToolbarItem) -> String? {
+        for label in [item.label, item.paletteLabel] {
+            if let tooltip = tooltipsByLabel[label] {
+                return tooltip
+            }
+        }
+        return nil
+    }
+
+    private static func applyTooltip(_ tooltip: String, to view: NSView?) {
+        guard let view else { return }
+        if view.toolTip == nil || view.toolTip?.isEmpty == true {
+            view.toolTip = tooltip
+        }
+        for subview in view.subviews {
+            applyTooltip(tooltip, to: subview)
+        }
     }
 }
 #endif
